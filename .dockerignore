@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+data/
+google_token.json
+client_secret*.json
+*service-account*.json
+.git
+.venv
+__pycache__
+tests/
+assets/
