@@ -192,6 +192,14 @@ class Database:
         self.conn.commit()
         return cur.rowcount > 0
 
+    def tag_counts(self, guild_id: int) -> list[tuple[str, int]]:
+        """자료에 실제로 붙은 태그와 자료 수 (많은 순)."""
+        counts: dict[str, int] = {}
+        for row in self.conn.execute("SELECT tags FROM documents WHERE guild_id = ?", (guild_id,)):
+            for tag in set(json.loads(row["tags"] or "[]")):
+                counts[tag] = counts.get(tag, 0) + 1
+        return sorted(counts.items(), key=lambda x: (-x[1], x[0]))
+
     def glossary(self, guild_id: int) -> list[tuple[str, str]]:
         rows = self.conn.execute("SELECT term, meaning FROM glossary WHERE guild_id = ? ORDER BY term", (guild_id,))
         return [(r["term"], r["meaning"]) for r in rows]

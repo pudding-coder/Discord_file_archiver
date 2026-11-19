@@ -102,6 +102,20 @@ def doc_links(doc: dict, base_url: str) -> list[str]:
     return links
 
 
+def render_tags(topic_tags: list[str], counts: list[tuple[str, int]]) -> str:
+    lines = ["**기본 주제 태그** (AI가 여기서 골라요)", ", ".join(topic_tags) or "없음", ""]
+    if counts:
+        lines.append("**자료에 붙은 태그** (자료 수)")
+        lines.append(", ".join(f"{tag} {n}" for tag, n in counts[:40]))
+        extra = [tag for tag, _ in counts if tag not in topic_tags]
+        if extra:
+            lines.append(f"기본 목록에 없는 태그: {', '.join(extra[:20])} (팀 규칙이나 `/수정`으로 붙은 태그)")
+    else:
+        lines.append("아직 태그가 붙은 자료가 없어요.")
+    lines += ["", "새 태그를 쓰게 하려면 `/규칙 등록`으로 알려 주거나, 봇 설정의 `TOPIC_TAGS`에 추가하세요."]
+    return "\n".join(lines)[:2000]
+
+
 # ── 버튼 (custom_id에 상태를 담아 봇을 재시작해도 동작) ──────
 class IntentButton(discord.ui.DynamicItem[discord.ui.Button], template=r"intent:(?P<doc>\d+):(?P<intent>\w+):(?P<mode>[pi])"):
     def __init__(self, doc_id: int, intent: str, mode: str, selected: bool = False):
@@ -510,6 +524,13 @@ def register_commands(bot: ArchiveBot) -> None:
             lines.append(f"⏳ 아직 올리지 못한 자료 {links['pending']}건은 잠시 후 다시 올려요.")
         lines.append("이 폴더를 ChatGPT·Gemini·Claude의 구글 드라이브 연결에 추가하면 AI가 팀 자료를 바로 읽어요.")
         await interaction.followup.send("\n".join(lines), ephemeral=True, suppress_embeds=True)
+
+    @tree.command(name="태그", description="기본 주제 태그와 자료에 실제로 붙은 태그를 봐요.")
+    @guild_only
+    async def tags(interaction: discord.Interaction):
+        await interaction.response.send_message(render_tags(bot.config.topic_tags,
+                                                            service.db.tag_counts(interaction.guild_id)),
+                                                ephemeral=True)
 
     @tree.command(name="통계", description="자료 보관·검색 지표를 봐요.")
     @app_commands.rename(days="기간")

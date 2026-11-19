@@ -172,3 +172,18 @@ async def test_forwarded_message_files_are_archived(config, service):
     await bot.on_message(msg)
     kinds = sorted(d["kind"] for d in service.db.list_docs(1))
     assert kinds == ["file", "link"] and msg.reactions == ["📌"]
+
+
+async def test_tags_command_lists_default_and_used_tags(config, service, src):
+    from archivebot.bot import render_tags
+    from tests.test_service import ScriptedAnalyzer
+
+    service.analyzer = ScriptedAnalyzer(tags=["리서치", "아이디어"])
+    await service.ingest_file(src, "a.pdf", make_pdf("a"), [])
+    service.analyzer = ScriptedAnalyzer(tags=["리서치"])
+    await service.ingest_file(src, "b.pdf", make_pdf("b"), [])
+    assert service.db.tag_counts(1) == [("리서치", 2), ("아이디어", 1)]
+    text = render_tags(config.topic_tags, service.db.tag_counts(1))
+    assert "기획, 리서치" in text and "리서치 2, 아이디어 1" in text and "기본 목록에 없는 태그: 아이디어" in text
+    assert "아직 태그가 붙은 자료가 없어요" in render_tags(config.topic_tags, [])
+    assert "태그" in {c.name for c in ArchiveBot(config, service).tree.get_commands()}
