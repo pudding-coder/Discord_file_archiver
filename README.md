@@ -22,6 +22,12 @@
    - View Channels, Send Messages, Read Message History, Add Reactions, Attach Files
 4. 만들어진 URL로 팀 서버에 봇을 초대합니다.
 
+   URL Generator를 못 찾겠으면 **General Information**의 **Application ID**를 복사해 아래 주소의 `<APPLICATION_ID>`를 바꿔 쓰면 됩니다. 위 다섯 가지 권한이 이미 들어 있습니다.
+
+   ```
+   https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot+applications.commands&permissions=101440
+   ```
+
 ### 2. 실행
 
 Python 3.10 이상이 필요합니다.
