@@ -84,3 +84,66 @@ async def test_service_uses_gemini_size_limit(service, src):
     service.analyzer = ai
     await service.ingest_file(src, "scan.pdf", blank_pdf(3), [])
     assert len(fake.calls[0].contents) == 1
+
+
+async def test_missing_model_switches_to_available_flash():
+    from google.genai import errors
+
+    ai = GeminiAnalyzer("test-key", "gemini-flash-latest")
+    used = []
+
+    class Models:
+        async def generate_content(self, model, contents, config):
+            used.append(model)
+            if model == "gemini-flash-latest":
+                raise errors.ClientError(404, {"error": {"code": 404, "message": "not found", "status": "NOT_FOUND"}})
+            return SimpleNamespace(parsed=ANALYSIS, text="{}")
+
+        async def list(self):
+            async def gen():
+                for name, actions in [("models/gemini-2.5-pro", ["generateContent"]),
+                                      ("models/gemini-2.5-flash", ["generateContent"]),
+                                      ("models/gemini-2.5-flash-lite", ["generateContent"]),
+                                      ("models/text-embedding-004", ["embedContent"])]:
+                    yield SimpleNamespace(name=name, supported_actions=actions)
+            return gen()
+
+    ai.client = SimpleNamespace(aio=SimpleNamespace(models=Models()))
+    item = AnalyzeInput(kind="file", name="a.txt", text="본문", topic_tags=["기획"])
+    assert await ai.analyze(item) == ANALYSIS
+    assert used == ["gemini-flash-latest", "gemini-2.5-flash"] and ai.model == "gemini-2.5-flash"
+    await ai.analyze(item)
+    assert used[-1] == "gemini-2.5-flash"          # 다음부터는 바로 새 모델
+
+
+async def test_other_errors_are_not_retried():
+    from google.genai import errors
+
+    ai = GeminiAnalyzer("test-key", "gemini-2.5-flash")
+    calls = []
+
+    class Models:
+        async def generate_content(self, model, contents, config):
+            calls.append(model)
+            raise errors.ClientError(429, {"error": {"code": 429, "message": "quota", "status": "RESOURCE_EXHAUSTED"}})
+
+    ai.client = SimpleNamespace(aio=SimpleNamespace(models=Models()))
+    with pytest.raises(errors.ClientError):
+        await ai.pick("x", [], [])
+    assert calls == ["gemini-2.5-flash"]
+
+
+def test_pick_flash_model():
+    from archivebot.llm import pick_flash_model
+
+    names = ["models/gemini-2.5-flash", "models/gemini-2.5-flash-lite", "models/gemini-3-flash-preview",
+             "models/gemini-2.0-flash-001", "models/gemini-2.5-flash-image", "models/gemini-2.5-pro"]
+    assert pick_flash_model(names) == "gemini-2.5-flash"
+    assert pick_flash_model(["models/gemini-3-flash-preview", "models/gemini-2.5-pro"]) == "gemini-3-flash-preview"
+    assert pick_flash_model(["models/gemini-2.5-flash-lite"]) == "gemini-2.5-flash-lite"
+    assert pick_flash_model(["models/gemini-2.5-pro"]) is None
+
+
+def test_client_uses_v1beta():
+    ai = GeminiAnalyzer("test-key", "gemini-2.5-flash")
+    assert ai.client._api_client._http_options.api_version == "v1beta"

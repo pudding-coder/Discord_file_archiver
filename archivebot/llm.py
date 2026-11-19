@@ -206,6 +206,26 @@ class ClaudeAnalyzer:
         return [(p.doc_id, p.reason) for p in result.picks[:5]]
 
 
+def pick_flash_model(names: list[str]) -> str | None:
+    """모델 목록에서 분류에 쓸 Flash 모델을 고른다: 정식 > 미리보기, 버전 높은 것, Lite는 마지막."""
+    def version(name: str) -> float:
+        m = re.search(r"gemini-(\d+(?:\.\d+)?)", name)
+        return float(m.group(1)) if m else 0.0
+
+    skip = ("image", "tts", "audio", "live", "embedding", "native", "thinking", "computer", "robotics", "learnlm")
+    cands = []
+    for raw in names:
+        name = raw.split("/", 1)[-1]
+        if "flash" not in name or any(word in name for word in skip):
+            continue
+        preview = any(word in name for word in ("preview", "exp"))
+        lite = "lite" in name
+        alias = name.endswith("-latest")
+        # 정렬 키: Lite 아님, 정식, 별칭이 아닌 고정 이름, 높은 버전, 짧은 이름
+        cands.append(((not lite, not preview, not alias, version(name), -len(name)), name))
+    return max(cands)[1] if cands else None
+
+
 class GeminiAnalyzer:
     """Google Gemini API. 무료 등급은 분당·하루 요청 수가 적어서, 한도를 넘으면 예외가 나고
     서비스가 간이 분류·글자 검색으로 대신한다."""
@@ -216,14 +236,39 @@ class GeminiAnalyzer:
 
     def __init__(self, api_key: str, model: str):
         from google import genai
-
-        self.client = genai.Client(api_key=api_key)
-        self.model = model
-
-    async def _parse(self, system: str, contents: list, schema: type[BaseModel]):
         from google.genai import types
 
-        response = await self.client.aio.models.generate_content(
+        # 구조화 출력·모델 별칭은 v1beta에서 쓴다 (v1은 일부 모델 이름을 모른다)
+        self.client = genai.Client(api_key=api_key, http_options=types.HttpOptions(api_version="v1beta"))
+        self.model = model
+        self._model_checked = False
+
+    async def _parse(self, system: str, contents: list, schema: type[BaseModel]):
+        from google.genai import errors
+
+        try:
+            response = await self._generate(system, contents, schema)
+        except errors.ClientError as e:
+            # 설정한 모델 이름이 없어졌거나 틀렸으면, 쓸 수 있는 Flash 모델을 찾아 한 번 다시 시도한다
+            if getattr(e, "code", None) != 404 or self._model_checked:
+                raise
+            self._model_checked = True
+            replacement = await self.find_available_model()
+            if not replacement or replacement == self.model:
+                raise
+            log.warning("Gemini 모델 %s을(를) 찾을 수 없어 %s(으)로 바꿉니다. GEMINI_MODEL에 이 이름을 넣어 두세요.",
+                        self.model, replacement)
+            self.model = replacement
+            response = await self._generate(system, contents, schema)
+        parsed = response.parsed
+        if not isinstance(parsed, schema):
+            raise RuntimeError(f"Gemini 응답을 읽지 못했습니다: {str(response.text or '')[:200]}")
+        return parsed
+
+    async def _generate(self, system: str, contents: list, schema: type[BaseModel]):
+        from google.genai import types
+
+        return await self.client.aio.models.generate_content(
             model=self.model,
             contents=contents,
             config=types.GenerateContentConfig(
@@ -233,10 +278,16 @@ class GeminiAnalyzer:
                 temperature=0.2,
             ),
         )
-        parsed = response.parsed
-        if not isinstance(parsed, schema):
-            raise RuntimeError(f"Gemini 응답을 읽지 못했습니다: {str(response.text or '')[:200]}")
-        return parsed
+
+    async def find_available_model(self) -> str | None:
+        names = []
+        async for model in await self.client.aio.models.list():
+            actions = getattr(model, "supported_actions", None) or []
+            if model.name and (not actions or "generateContent" in actions):
+                names.append(model.name)
+        choice = pick_flash_model(names)
+        log.info("쓸 수 있는 Gemini 모델 %d개 중 %s을(를) 골랐습니다", len(names), choice)
+        return choice
 
     async def analyze(self, item: AnalyzeInput) -> Analysis:
         from google.genai import types
