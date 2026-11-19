@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import logging
 import re
 
@@ -79,7 +78,7 @@ def render_info(service: ArchiveService, doc: dict) -> str:
             for d in chain))
     if doc.get("jump_url"):
         lines.append(f"[원문 메시지]({doc['jump_url']})")
-    lines.append("공유 의도가 다르면 아래에서 고쳐 주세요.")
+    lines.append("공유 의도·태그·제목이 다르면 아래에서 고쳐 주세요. 고친 내용은 모두 기록돼요.")
     return "\n".join(lines)
 
 
@@ -113,7 +112,7 @@ def render_tags(topic_tags: list[str], counts: list[tuple[str, int]]) -> str:
         lines.append(", ".join(f"{tag} {n}" for tag, n in counts[:40]))
         extra = [tag for tag, _ in counts if tag not in topic_tags]
         if extra:
-            lines.append(f"기본 목록에 없는 태그: {', '.join(extra[:20])} (팀 규칙이나 `/수정`으로 붙은 태그)")
+            lines.append(f"기본 목록에 없는 태그: {', '.join(extra[:20])} (팀 규칙이나 자료 정보에서 붙인 태그)")
     else:
         lines.append("아직 태그가 붙은 자료가 없어요.")
     lines += ["", "새 태그를 쓰게 하려면 `/규칙 등록`으로 알려 주거나, 봇 설정의 `TOPIC_TAGS`에 추가하세요."]
@@ -233,6 +232,43 @@ class TagSelect(discord.ui.DynamicItem[discord.ui.Select], template=r"tags:(?P<d
         await _refresh_panel(interaction, service, doc, self.mode)
 
 
+class TitleModal(discord.ui.Modal):
+    def __init__(self, doc: dict):
+        super().__init__(title="제목 고치기", timeout=300)
+        self.doc_id = doc["id"]
+        self.new_title = discord.ui.TextInput(label="새 제목", default=(doc.get("title") or "")[:100],
+                                              min_length=1, max_length=100)
+        self.add_item(self.new_title)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        service: ArchiveService = interaction.client.service  # type: ignore[attr-defined]
+        try:
+            doc = service.edit_doc(self.doc_id, interaction.user.id, interaction.user.display_name,
+                                   title=str(self.new_title.value).strip())
+        except LookupError as e:
+            return await interaction.response.send_message(str(e), ephemeral=True)
+        await interaction.response.edit_message(content=render_info(service, doc),
+                                                view=build_panel_view(doc, "i", service.config.topic_tags))
+
+
+class TitleButton(discord.ui.DynamicItem[discord.ui.Button], template=r"title:(?P<doc>\d+)"):
+    def __init__(self, doc_id: int):
+        super().__init__(discord.ui.Button(label="제목 고치기", emoji="✏️", row=3,
+                                           style=discord.ButtonStyle.secondary, custom_id=f"title:{doc_id}"))
+        self.doc_id = doc_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(int(match["doc"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        service: ArchiveService = interaction.client.service  # type: ignore[attr-defined]
+        doc = service.db.get_doc(self.doc_id)
+        if doc is None:
+            return await interaction.response.send_message(f"자료 #{self.doc_id}를 찾을 수 없어요.", ephemeral=True)
+        await interaction.response.send_modal(TitleModal(doc))
+
+
 def build_panel_view(doc: dict, mode: str, topic_tags: list[str] | tuple = ()) -> discord.ui.View | None:
     """mode p: 자료를 올린 직후의 확인 메시지(애매한 것만 묻는다) / i: '자료 정보' 패널(항상 수정 가능)."""
     view = discord.ui.View(timeout=None)
@@ -244,6 +280,8 @@ def build_panel_view(doc: dict, mode: str, topic_tags: list[str] | tuple = ()) -
     if doc["pending_version"]:
         view.add_item(VersionButton(doc["id"], "keep"))
         view.add_item(VersionButton(doc["id"], "split"))
+    if mode == "i":
+        view.add_item(TitleButton(doc["id"]))
     return view if view.children else None
 
 
@@ -272,7 +310,7 @@ class ArchiveBot(discord.Client):
         register_commands(self)
 
     async def setup_hook(self) -> None:
-        self.add_dynamic_items(IntentButton, VersionButton, ShareButton, TagSelect)
+        self.add_dynamic_items(IntentButton, VersionButton, ShareButton, TagSelect, TitleButton)
         if self.service.sync is not None:
             self.service.sync.guild_name = lambda gid: getattr(self.get_guild(gid), "name", None) or str(gid)
             self._drive_task = asyncio.create_task(self.service.sync.run_forever())
@@ -374,7 +412,7 @@ def register_commands(bot: ArchiveBot) -> None:
         event_id, hits = await service.search(interaction.guild_id, interaction.user.id, query)
         if not hits:
             return await interaction.followup.send(
-                f"'{query}'에 맞는 자료를 못 찾았어요. 다른 말로 다시 물어보거나 `/최근`으로 목록을 확인해 보세요.",
+                f"'{query}'에 맞는 자료를 못 찾았어요. 다른 말로 다시 물어보거나 `/드라이브`의 자료 목록 시트를 확인해 보세요.",
                 ephemeral=True)
         view = discord.ui.View(timeout=None)
         for i, hit in enumerate(hits, 1):
@@ -382,37 +420,6 @@ def register_commands(bot: ArchiveBot) -> None:
         body = "\n\n".join(render_hit(i, h, bot.config.archive_base_url) for i, h in enumerate(hits, 1))
         await interaction.followup.send(f"🔎 **{query}**\n\n{body}"[:2000], view=view, ephemeral=True,
                                         suppress_embeds=True)
-
-    @tree.command(name="최근", description="최근에 보관된 자료 목록을 봐요.")
-    @app_commands.rename(count="개수")
-    @guild_only
-    async def recent(interaction: discord.Interaction, count: app_commands.Range[int, 1, 20] = 10):
-        docs = service.db.list_docs(interaction.guild_id, limit=count)
-        if not docs:
-            return await interaction.response.send_message(
-                "아직 보관된 자료가 없어요. 채널에 PDF나 링크를 올리면 자동으로 보관해요.", ephemeral=True)
-        lines = [f"`#{d['id']}` {one_line(d)} · {d['created_at'][:10]}"
-                 + (f" · [원문]({d['jump_url']})" if d.get("jump_url") else "") for d in docs]
-        await interaction.response.send_message("\n".join(lines)[:2000], ephemeral=True, suppress_embeds=True)
-
-    @tree.command(name="수정", description="자료의 공유 의도·제목·태그를 고쳐요. 수정은 모두 기록돼요.")
-    @app_commands.rename(doc_id="자료번호", intent="의도", title="제목", tags="태그")
-    @app_commands.describe(doc_id="/최근이나 자료 정보에 나오는 # 번호", tags="쉼표로 구분")
-    @app_commands.choices(intent=[app_commands.Choice(name=v[0], value=k) for k, v in INTENTS.items()])
-    @guild_only
-    async def edit(interaction: discord.Interaction, doc_id: int, intent: app_commands.Choice[str] | None = None,
-                   title: str | None = None, tags: str | None = None):
-        doc = service.db.get_doc(doc_id)
-        if doc is None or doc["guild_id"] != interaction.guild_id:
-            return await interaction.response.send_message(f"자료 #{doc_id}를 찾을 수 없어요.", ephemeral=True)
-        who = (interaction.user.id, interaction.user.display_name)
-        if intent:
-            doc = service.set_intent(doc_id, intent.value, *who)
-        if title or tags is not None:
-            tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags is not None else None
-            doc = service.edit_doc(doc_id, *who, title=title, tags=tag_list)
-        await interaction.response.send_message(render_info(service, doc), view=build_panel_view(doc, "i", bot.config.topic_tags),
-                                                ephemeral=True, suppress_embeds=True)
 
     @tree.context_menu(name="자료 정보")
     @guild_only
@@ -467,8 +474,12 @@ def register_commands(bot: ArchiveBot) -> None:
     async def rule_list(interaction: discord.Interaction):
         service.ensure_default_rules(interaction.guild_id)
         items = service.db.rules(interaction.guild_id)
-        text = "\n".join(f"`{i}` {t}" for i, t in items) or "등록된 규칙이 없어요. `/규칙 등록`으로 추가해 보세요."
-        await interaction.response.send_message(text[:2000], ephemeral=True)
+        rules_text = "\n".join(f"`{i}` {t}" for i, t in items) or "등록된 규칙이 없어요. `/규칙 등록`으로 추가해 보세요."
+        tags_text = render_tags(bot.config.topic_tags, service.db.tag_counts(interaction.guild_id))
+        room = 2000 - len(tags_text) - 30
+        if len(rules_text) > room:
+            rules_text = rules_text[: max(room, 0)] + " …"
+        await interaction.response.send_message(f"**팀 규칙**\n{rules_text}\n\n{tags_text}"[:2000], ephemeral=True)
 
     @rules.command(name="삭제", description="규칙을 지워요.")
     @app_commands.rename(rule_id="번호")
@@ -530,18 +541,11 @@ def register_commands(bot: ArchiveBot) -> None:
                 "드라이브 폴더를 만들지 못했어요. 봇 실행 기록(로그)에서 구글 인증 오류를 확인해 주세요.", ephemeral=True)
         lines = [f"📁 [자료 폴더]({links['folder']})"]
         if links["sheet"]:
-            lines.append(f"📊 [자료 목록 시트]({links['sheet']}) — 봇이 계속 덮어쓰니 수정은 `/수정`으로 해 주세요.")
+            lines.append(f"📊 [자료 목록 시트]({links['sheet']}) — 봇이 계속 덮어쓰니, 고칠 땐 자료 메시지 우클릭 → 앱 → **자료 정보**를 써 주세요.")
         if links["pending"]:
             lines.append(f"⏳ 아직 올리지 못한 자료 {links['pending']}건은 잠시 후 다시 올려요.")
         lines.append("이 폴더를 ChatGPT·Gemini·Claude의 구글 드라이브 연결에 추가하면 AI가 팀 자료를 바로 읽어요.")
         await interaction.followup.send("\n".join(lines), ephemeral=True, suppress_embeds=True)
-
-    @tree.command(name="태그", description="기본 주제 태그와 자료에 실제로 붙은 태그를 봐요.")
-    @guild_only
-    async def tags(interaction: discord.Interaction):
-        await interaction.response.send_message(render_tags(bot.config.topic_tags,
-                                                            service.db.tag_counts(interaction.guild_id)),
-                                                ephemeral=True)
 
     @tree.command(name="통계", description="자료 보관·검색 지표를 봐요.")
     @app_commands.rename(days="기간")
@@ -561,14 +565,6 @@ def register_commands(bot: ArchiveBot) -> None:
             f"- 검색 소요 시간(중앙값): {median} — `/찾아줘`부터 공유 버튼까지\n"
             f"- 아카이브 재사용: `/찾아줘` {s['searches']}회, 공유 {s['shares']}회, "
             f"다시 쓰인 자료 {pct(s['reused'], s['docs'])}", ephemeral=True)
-
-    @tree.command(name="내보내기", description="보관된 자료 목록을 CSV로 받아요.")
-    @guild_only
-    async def export(interaction: discord.Interaction):
-        data = service.export_csv(interaction.guild_id).encode("utf-8-sig")
-        await interaction.response.send_message(
-            "자료 목록이에요. 엑셀이나 구글 시트에서 바로 열 수 있어요.",
-            file=discord.File(io.BytesIO(data), filename="team-archive.csv"), ephemeral=True)
 
     @tree.error
     async def on_error(interaction: discord.Interaction, error: app_commands.AppCommandError):

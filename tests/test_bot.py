@@ -48,7 +48,9 @@ class FakeMessage:
 def test_commands_register(config, service):
     bot = ArchiveBot(config, service)
     names = {c.name for c in bot.tree.get_commands()}
-    assert {"찾아줘", "최근", "수정", "용어", "규칙", "수집", "과거수집", "통계", "내보내기", "자료 정보"} <= names
+    names = {c.name for c in bot.tree.get_commands()}
+    assert not names & {"최근", "수정", "태그", "내보내기", "카톡가져오기"}
+    assert {"찾아줘", "용어", "규칙", "수집", "과거수집", "통계", "자료 정보"} <= names
     for command in bot.tree.get_commands():
         command.to_dict(bot.tree)   # 디스코드에 보낼 명령 정의가 만들어지는지
 
@@ -117,7 +119,8 @@ async def test_panels_render(config, service, src):
     assert build_panel_view(done, "p") is not None          # 태그가 아직 남음
     done = service.set_tags(done["id"], ["발표"], 7, "민수")
     assert build_panel_view(done, "p") is None
-    assert len(build_panel_view(done, "i", config.topic_tags).children) == 5   # 의도 4 + 태그 메뉴
+    info_ids = [c.custom_id for c in build_panel_view(done, "i", config.topic_tags).children]
+    assert len(info_ids) == 6 and info_ids[-1] == f"title:{done['id']}"   # 의도 4 + 태그 메뉴 + 제목 고치기
     assert "v1 IR_v1" in render_info(service, done)
     hit = render_hit(1, SearchHit(doc=v1, latest=v2), "https://drive.example/folder")
     assert "최신본이 아니에요" in hit and "원문 메시지" in hit and "드라이브 폴더" in hit
@@ -190,7 +193,7 @@ async def test_tags_command_lists_default_and_used_tags(config, service, src):
     text = render_tags(config.topic_tags, service.db.tag_counts(1))
     assert "기획, 리서치" in text and "리서치 2, 아이디어 1" in text and "기본 목록에 없는 태그: 아이디어" in text
     assert "아직 태그가 붙은 자료가 없어요" in render_tags(config.topic_tags, [])
-    assert "태그" in {c.name for c in ArchiveBot(config, service).tree.get_commands()}
+    assert "태그" not in {c.name for c in ArchiveBot(config, service).tree.get_commands()}   # /규칙 목록에 합쳐짐
 
 
 async def test_default_rules_are_seeded_once(config, service, src):
@@ -253,3 +256,28 @@ async def test_tag_menu_callback_saves_selection(config, service, src):
     await item.callback(interaction)
     assert service.db.get_doc(doc["id"])["tags"] == ["발표"]
     assert edits and "view" in edits[0]
+
+
+async def test_title_button_opens_modal_and_saves(config, service, src):
+    from archivebot.bot import TitleButton, TitleModal
+
+    doc = (await service.ingest_file(src, "a.pdf", make_pdf("a"), [])).doc
+    sent = {}
+
+    async def send_modal(modal):
+        sent["modal"] = modal
+
+    async def edit_message(**kwargs):
+        sent["edit"] = kwargs
+
+    interaction = SimpleNamespace(
+        client=SimpleNamespace(service=service), user=SimpleNamespace(id=9, display_name="지현"),
+        response=SimpleNamespace(send_modal=send_modal, edit_message=edit_message))
+    await TitleButton(doc["id"]).callback(interaction)
+    modal = sent["modal"]
+    assert isinstance(modal, TitleModal) and modal.new_title.default == doc["title"]
+    modal.new_title._value = "  본선 IR 최종  "
+    await modal.on_submit(interaction)
+    updated = service.db.get_doc(doc["id"])
+    assert updated["title"] == "본선 IR 최종" and "본선 IR 최종" in sent["edit"]["content"]
+    assert service.db.audit_for(doc["id"])[-1]["action"] == "title"
