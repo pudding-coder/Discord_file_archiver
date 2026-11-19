@@ -17,7 +17,7 @@ class ScriptedAnalyzer:
 
     async def analyze(self, item):
         self.inputs.append(item)
-        base = dict(title=item.name, summary="요약", tags=["기획"], intent="reference", confidence=0.9,
+        base = dict(title=item.name, summary="요약", tags=["기획"], tag_confidence=0.9, intent="reference", confidence=0.9,
                     version_label="", previous_version_id=0, change_note="", text_excerpt="", is_material=True)
         over = self.overrides(item) if callable(self.overrides) else self.overrides
         return Analysis(**{**base, **over})
@@ -87,7 +87,8 @@ async def test_confident_ai_needs_no_confirmation_and_gets_team_context(service,
     assert doc["pending_intent"] == 0 and doc["intent"] == "submission"
     item = service.analyzer.inputs[0]
     assert item.glossary == [("경쟁사조사", "벤치마킹")]
-    assert item.rules == ["리서치 자료는 제목 앞에 [리서치]"]
+    assert item.rules[-1] == "리서치 자료는 제목 앞에 [리서치]"   # 팀이 먼저 등록했으니 기본 규칙은 넣지 않음
+    assert len(item.rules) == 1
     assert item.context == ["지현: 이걸로 제출하자"]
 
 

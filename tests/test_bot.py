@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from archivebot.bot import ArchiveBot, build_panel_view, render_hit, render_info, render_prompt
-from archivebot.service import SearchHit
+from archivebot.service import SearchHit, Source
 from tests.conftest import make_pdf
 
 
@@ -63,7 +63,9 @@ async def test_uncertain_upload_gets_pin_and_confirmation(config, service):
     assert "경쟁사" in content and "헷갈려요" in content
     ids = [c.custom_id for c in kwargs["view"].children]
     doc = service.db.list_docs(1)[0]
-    assert ids == [f"intent:{doc['id']}:{k}:p" for k in ("reference", "competitor", "feedback", "submission")]
+    assert ids[:4] == [f"intent:{doc['id']}:{k}:p" for k in ("reference", "competitor", "feedback", "submission")]
+    assert ids[4] == f"tags:{doc['id']}:p"     # 간이 분류는 태그도 확신이 없어 함께 묻는다
+    assert "주제도 헷갈려요" in content
     assert kwargs["silent"] and kwargs["delete_after"] == config.prompt_ttl
     assert doc["jump_url"] == msg.jump_url and doc["author_name"] == "민수"
 
@@ -112,8 +114,10 @@ async def test_panels_render(config, service, src):
     assert f"ver:{v2['id']}:keep" in ids and f"ver:{v2['id']}:split" in ids
     done = service.resolve_version(v2["id"], True, 7, "민수")
     done = service.set_intent(done["id"], "reference", 7, "민수")
+    assert build_panel_view(done, "p") is not None          # 태그가 아직 남음
+    done = service.set_tags(done["id"], ["발표"], 7, "민수")
     assert build_panel_view(done, "p") is None
-    assert len(build_panel_view(done, "i").children) == 4
+    assert len(build_panel_view(done, "i", config.topic_tags).children) == 5   # 의도 4 + 태그 메뉴
     assert "v1 IR_v1" in render_info(service, done)
     hit = render_hit(1, SearchHit(doc=v1, latest=v2), "https://drive.example/folder")
     assert "최신본이 아니에요" in hit and "원문 메시지" in hit and "드라이브 폴더" in hit
@@ -187,3 +191,65 @@ async def test_tags_command_lists_default_and_used_tags(config, service, src):
     assert "기획, 리서치" in text and "리서치 2, 아이디어 1" in text and "기본 목록에 없는 태그: 아이디어" in text
     assert "아직 태그가 붙은 자료가 없어요" in render_tags(config.topic_tags, [])
     assert "태그" in {c.name for c in ArchiveBot(config, service).tree.get_commands()}
+
+
+async def test_default_rules_are_seeded_once(config, service, src):
+    from archivebot.config import default_rules
+
+    await service.ingest_file(src, "a.pdf", make_pdf("a"), [])
+    rules = [t for _, t in service.db.rules(1)]
+    assert rules == default_rules(config.topic_tags)
+    assert "리서치: 조사 자료" in rules[0] and "제출용" in rules[1]
+    for rule_id, _ in service.db.rules(1):                     # 팀이 전부 지워도
+        service.db.delete_rule(1, rule_id)
+    await service.ingest_file(src, "b.pdf", make_pdf("b"), [])
+    assert service.db.rules(1) == []                            # 다시 넣지 않는다
+
+    config.default_rules = False
+    await service.ingest_file(Source(guild_id=2, author_name="x"), "c.pdf", make_pdf("c"), [])
+    assert service.db.rules(2) == []
+
+
+async def test_uncertain_tags_ask_with_menu_and_confident_ones_do_not(config, service, src):
+    from tests.test_service import ScriptedAnalyzer
+
+    service.analyzer = ScriptedAnalyzer(tags=["리서치"], tag_confidence=0.4, confidence=0.95)
+    doc = (await service.ingest_file(src, "a.pdf", make_pdf("a"), [])).doc
+    assert doc["pending_tags"] == 1 and doc["pending_intent"] == 0
+    view = build_panel_view(doc, "p", config.topic_tags)
+    (menu,) = view.children                                     # 의도는 확신해서 태그 메뉴만
+    assert menu.custom_id == f"tags:{doc['id']}:p" and menu.item.max_values == 3
+    assert [o.label for o in menu.item.options if o.default] == ["리서치"]
+    prompt = render_prompt(service, doc)
+    assert "주제도 헷갈려요" in prompt and "왜 올린" not in prompt
+
+    fixed = service.set_tags(doc["id"], ["리서치", "아이디어"], 9, "지현")
+    assert fixed["tags"] == ["리서치", "아이디어"] and fixed["pending_tags"] == 0
+    assert build_panel_view(fixed, "p") is None
+    assert service.db.stats(1, 7)["tag_corrected"] == 1
+    # 기본 목록에 없는 태그도 메뉴에 선택된 채로 보인다
+    info_menu = [c for c in build_panel_view(fixed, "i", config.topic_tags).children if c.custom_id.startswith("tags:")][0]
+    assert {o.label for o in info_menu.item.options if o.default} == {"리서치", "아이디어"}
+
+    service.analyzer = ScriptedAnalyzer(tag_confidence=0.95, confidence=0.95)
+    sure = (await service.ingest_file(src, "b.pdf", make_pdf("b"), [])).doc
+    assert sure["pending_tags"] == 0 and build_panel_view(sure, "p") is None
+
+
+async def test_tag_menu_callback_saves_selection(config, service, src):
+    from archivebot.bot import TagSelect
+
+    doc = (await service.ingest_file(src, "a.pdf", make_pdf("a"), [])).doc
+    item = TagSelect(doc["id"], "p", config.topic_tags, doc["tags"])
+    item.item._values = ["발표"]
+    edits = []
+
+    async def edit_message(**kwargs):
+        edits.append(kwargs)
+
+    interaction = SimpleNamespace(
+        client=SimpleNamespace(service=service), user=SimpleNamespace(id=9, display_name="지현"),
+        response=SimpleNamespace(edit_message=edit_message, send_message=None))
+    await item.callback(interaction)
+    assert service.db.get_doc(doc["id"])["tags"] == ["발표"]
+    assert edits and "view" in edits[0]

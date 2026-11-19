@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import search as lexical
-from .config import INTENTS, Config
+from .config import INTENTS, Config, default_rules
 from .db import Database
 from .extract import (IMAGE_EXTS, LinkContent, extension, extract_file_text, fetch_link, pdf_needs_ocr,
                       prepare_image, trim_pdf)
@@ -117,6 +117,7 @@ class ArchiveService:
                      text: str, data: bytes, context: list[str],
                      attachment: tuple[str, bytes] | None = None, is_image: bool = False) -> IngestResult | None:
         guild = src.guild_id
+        self.ensure_default_rules(guild)
         # 이미지 이름은 대개 image.png 같은 기본값이라 이름으로 버전을 찾으면 엉뚱하게 묶인다
         candidates = [] if is_image else self._version_candidates(guild, name, text)
         item = AnalyzeInput(
@@ -151,6 +152,7 @@ class ArchiveService:
             title=analysis.title.strip() or name, summary=analysis.summary.strip(),
             tags=[t.strip() for t in analysis.tags if t.strip()][:5],
             intent=intent, ai_intent=intent, confidence=confidence,
+            pending_tags=int(min(max(float(analysis.tag_confidence), 0.0), 1.0) < self.config.confidence_threshold),
             version_label=analysis.version_label.strip() or None,
             pending_intent=int(confidence < self.config.confidence_threshold),
             excerpt=text[:EXCERPT_CHARS], created_at=created,
@@ -223,11 +225,26 @@ class ArchiveService:
             self.db.update_doc(doc_id, title=title)
             self.db.audit(doc["guild_id"], doc_id, actor_id, actor_name, "title", doc["title"], title)
         if tags is not None:
-            self.db.update_doc(doc_id, tags=tags)
+            self.db.update_doc(doc_id, tags=tags, pending_tags=0)
             self.db.audit(doc["guild_id"], doc_id, actor_id, actor_name, "tags",
                           ", ".join(doc["tags"]), ", ".join(tags))
         self.refresh_index(doc["guild_id"])
         return self.db.get_doc(doc_id)
+
+    def set_tags(self, doc_id: int, tags: list[str], actor_id: int | None, actor_name: str) -> dict:
+        tags = list(dict.fromkeys(t.strip() for t in tags if t.strip()))[:5]
+        if not tags:
+            raise ValueError("태그를 하나 이상 골라 주세요.")
+        return self.edit_doc(doc_id, actor_id, actor_name, tags=tags)
+
+    def ensure_default_rules(self, guild_id: int) -> None:
+        """서버에서 처음 쓸 때 한 번만 기본 규칙을 넣는다. 팀이 지운 규칙은 다시 넣지 않는다."""
+        if not self.config.default_rules or self.db.get_setting(guild_id, "default_rules_seeded"):
+            return
+        if not self.db.rules(guild_id):
+            for text in default_rules(self.config.topic_tags):
+                self.db.add_rule(guild_id, text, "기본값")
+        self.db.set_setting(guild_id, "default_rules_seeded", "1")
 
     def _require(self, doc_id: int) -> dict:
         doc = self.db.get_doc(doc_id)

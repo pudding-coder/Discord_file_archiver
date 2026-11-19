@@ -24,7 +24,7 @@ def gemini_with(parsed) -> tuple[GeminiAnalyzer, FakeModels]:
     return ai, fake
 
 
-ANALYSIS = Analysis(title="경쟁사 요금표", summary="요약", tags=["리서치"], intent="competitor", confidence=0.9,
+ANALYSIS = Analysis(title="경쟁사 요금표", summary="요약", tags=["리서치"], tag_confidence=0.9, intent="competitor", confidence=0.9,
                     version_label="", previous_version_id=0, change_note="", text_excerpt="월 9,900원", is_material=True)
 
 

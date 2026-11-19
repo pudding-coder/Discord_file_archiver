@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS documents (
     version_no INTEGER NOT NULL DEFAULT 1,
     change_note TEXT,
     pending_intent INTEGER NOT NULL DEFAULT 0,
+    pending_tags INTEGER NOT NULL DEFAULT 0,
     pending_version INTEGER NOT NULL DEFAULT 0,
     excerpt TEXT,
     reuse_count INTEGER NOT NULL DEFAULT 0,
@@ -108,6 +109,8 @@ class Database:
         for name in ("drive_file_id", "drive_url"):
             if name not in cols:
                 self.conn.execute(f"ALTER TABLE documents ADD COLUMN {name} TEXT")
+        if "pending_tags" not in cols:
+            self.conn.execute("ALTER TABLE documents ADD COLUMN pending_tags INTEGER NOT NULL DEFAULT 0")
 
     def close(self) -> None:
         self.conn.close()
@@ -272,6 +275,10 @@ class Database:
             "AND intent_source = 'user' AND intent != ai_intent"
         )
         reused = q("SELECT COUNT(*) FROM documents WHERE guild_id = ? AND created_at >= ? AND reuse_count > 0")
+        tag_fixed = q(
+            "SELECT COUNT(DISTINCT a.doc_id) FROM audit_log a JOIN documents d ON d.id = a.doc_id "
+            "WHERE a.guild_id = ? AND d.created_at >= ? AND a.action = 'tags' AND a.before != a.after"
+        )
         count = lambda t: q("SELECT COUNT(*) FROM events WHERE guild_id = ? AND created_at >= ? AND type = ?", t)  # noqa: E731
         times = sorted(
             r[0] for r in self.conn.execute(
@@ -283,7 +290,7 @@ class Database:
             mid = len(times) // 2
             median = times[mid] if len(times) % 2 else (times[mid - 1] + times[mid]) / 2
         return {
-            "days": days, "docs": docs, "corrected": corrected, "reused": reused,
+            "days": days, "docs": docs, "corrected": corrected, "tag_corrected": tag_fixed, "reused": reused,
             "searches": count("search"), "shares": count("share"),
             "rerequests": count("rerequest"), "reshares": count("reshare"),
             "median_search_seconds": median,

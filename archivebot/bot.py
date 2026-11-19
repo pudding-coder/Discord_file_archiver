@@ -51,7 +51,12 @@ def render_prompt(service: ArchiveService, doc: dict) -> str:
     lines = [f"📌 {one_line(doc)} 저장했어요."]
     if doc["pending_intent"]:
         label = INTENTS[doc["intent"]][0]
-        lines.append(f"왜 올린 자료인지 헷갈려요. 일단 **{label}**로 뒀는데, 다르면 눌러 주세요. (안 누르면 그대로 둬요)")
+        lines.append(f"왜 올린 자료인지 헷갈려요. 일단 **{label}**로 뒀는데, 다르면 눌러 주세요.")
+    if doc.get("pending_tags"):
+        tags = ", ".join(doc["tags"]) or "없음"
+        lines.append(f"주제도 헷갈려요. 일단 **{tags}** 태그를 붙였는데, 다르면 메뉴에서 골라 주세요.")
+    if doc["pending_intent"] or doc.get("pending_tags"):
+        lines.append("(안 고르면 그대로 둬요)")
     if doc["pending_version"]:
         chain = service.db.version_chain(doc["version_group_id"])
         prev = next((d for d in reversed(chain) if d["id"] != doc["id"]), None)
@@ -144,7 +149,7 @@ class VersionButton(discord.ui.DynamicItem[discord.ui.Button], template=r"ver:(?
     def __init__(self, doc_id: int, action: str):
         keep = action == "keep"
         super().__init__(discord.ui.Button(
-            label="맞아요, 새 버전" if keep else "별개 자료예요", row=1,
+            label="맞아요, 새 버전" if keep else "별개 자료예요", row=2,
             style=discord.ButtonStyle.primary if keep else discord.ButtonStyle.secondary,
             custom_id=f"ver:{doc_id}:{action}",
         ))
@@ -202,12 +207,41 @@ class ShareButton(discord.ui.DynamicItem[discord.ui.Button], template=r"share:(?
         await interaction.response.send_message("채널에 공유했어요.", ephemeral=True)
 
 
-def build_panel_view(doc: dict, mode: str) -> discord.ui.View | None:
+class TagSelect(discord.ui.DynamicItem[discord.ui.Select], template=r"tags:(?P<doc>\d+):(?P<mode>[pi])"):
+    """주제 태그 고르기 (최대 3개). 기본 주제 태그 + 이 자료에 이미 붙은 태그를 보여 준다."""
+
+    def __init__(self, doc_id: int, mode: str, options: list[str] | None = None, selected: list[str] | None = None):
+        choices = list(dict.fromkeys([*(options or []), *(selected or [])]))[:25] or ["기타"]
+        super().__init__(discord.ui.Select(
+            custom_id=f"tags:{doc_id}:{mode}", row=1, placeholder="주제 태그 고르기 (최대 3개)",
+            min_values=1, max_values=min(3, len(choices)),
+            options=[discord.SelectOption(label=t[:100], value=t[:100], default=t in (selected or []))
+                     for t in choices],
+        ))
+        self.doc_id, self.mode = doc_id, mode
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(int(match["doc"]), match["mode"])
+
+    async def callback(self, interaction: discord.Interaction):
+        service: ArchiveService = interaction.client.service  # type: ignore[attr-defined]
+        try:
+            doc = service.set_tags(self.doc_id, list(self.item.values),
+                                   interaction.user.id, interaction.user.display_name)
+        except (LookupError, ValueError) as e:
+            return await interaction.response.send_message(str(e), ephemeral=True)
+        await _refresh_panel(interaction, service, doc, self.mode)
+
+
+def build_panel_view(doc: dict, mode: str, topic_tags: list[str] | tuple = ()) -> discord.ui.View | None:
     """mode p: 자료를 올린 직후의 확인 메시지(애매한 것만 묻는다) / i: '자료 정보' 패널(항상 수정 가능)."""
     view = discord.ui.View(timeout=None)
     if mode == "i" or doc["pending_intent"]:
         for intent in INTENTS:
             view.add_item(IntentButton(doc["id"], intent, mode, selected=intent == doc["intent"]))
+    if mode == "i" or doc.get("pending_tags"):
+        view.add_item(TagSelect(doc["id"], mode, list(topic_tags), doc["tags"]))
     if doc["pending_version"]:
         view.add_item(VersionButton(doc["id"], "keep"))
         view.add_item(VersionButton(doc["id"], "split"))
@@ -215,9 +249,11 @@ def build_panel_view(doc: dict, mode: str) -> discord.ui.View | None:
 
 
 async def _refresh_panel(interaction: discord.Interaction, service: ArchiveService, doc: dict, mode: str) -> None:
+    tags = service.config.topic_tags
     if mode == "i":
-        return await interaction.response.edit_message(content=render_info(service, doc), view=build_panel_view(doc, "i"))
-    view = build_panel_view(doc, "p")
+        return await interaction.response.edit_message(content=render_info(service, doc),
+                                                       view=build_panel_view(doc, "i", tags))
+    view = build_panel_view(doc, "p", tags)
     if view:
         return await interaction.response.edit_message(content=render_prompt(service, doc), view=view)
     # 물어볼 것이 끝나면 한 줄로 줄이고 곧 지워 대화를 방해하지 않는다
@@ -237,7 +273,7 @@ class ArchiveBot(discord.Client):
         register_commands(self)
 
     async def setup_hook(self) -> None:
-        self.add_dynamic_items(IntentButton, VersionButton, ShareButton)
+        self.add_dynamic_items(IntentButton, VersionButton, ShareButton, TagSelect)
         if self.service.sync is not None:
             self.service.sync.guild_name = lambda gid: getattr(self.get_guild(gid), "name", None) or str(gid)
             self._drive_task = asyncio.create_task(self.service.sync.run_forever())
@@ -301,7 +337,7 @@ class ArchiveBot(discord.Client):
             pass
         if not quiet:
             for r in new:
-                view = build_panel_view(r.doc, "p")
+                view = build_panel_view(r.doc, "p", self.config.topic_tags)
                 if view:   # 확신하면 📌 반응만, 애매할 때만 말을 건다
                     try:
                         await message.reply(render_prompt(self.service, r.doc), view=view, silent=True,
@@ -376,7 +412,7 @@ def register_commands(bot: ArchiveBot) -> None:
         if title or tags is not None:
             tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags is not None else None
             doc = service.edit_doc(doc_id, *who, title=title, tags=tag_list)
-        await interaction.response.send_message(render_info(service, doc), view=build_panel_view(doc, "i"),
+        await interaction.response.send_message(render_info(service, doc), view=build_panel_view(doc, "i", bot.config.topic_tags),
                                                 ephemeral=True, suppress_embeds=True)
 
     @tree.context_menu(name="자료 정보")
@@ -385,10 +421,10 @@ def register_commands(bot: ArchiveBot) -> None:
         docs = service.db.docs_by_message(message.id)
         if not docs:
             return await interaction.response.send_message("이 메시지에서 보관된 자료가 없어요.", ephemeral=True)
-        await interaction.response.send_message(render_info(service, docs[0]), view=build_panel_view(docs[0], "i"),
+        await interaction.response.send_message(render_info(service, docs[0]), view=build_panel_view(docs[0], "i", bot.config.topic_tags),
                                                 ephemeral=True, suppress_embeds=True)
         for d in docs[1:MAX_ITEMS_PER_MESSAGE]:
-            await interaction.followup.send(render_info(service, d), view=build_panel_view(d, "i"),
+            await interaction.followup.send(render_info(service, d), view=build_panel_view(d, "i", bot.config.topic_tags),
                                             ephemeral=True, suppress_embeds=True)
 
     # 팀 용어·규칙: 코드가 아니라 말로 등록한다
@@ -430,6 +466,7 @@ def register_commands(bot: ArchiveBot) -> None:
 
     @rules.command(name="목록", description="등록된 규칙을 봐요.")
     async def rule_list(interaction: discord.Interaction):
+        service.ensure_default_rules(interaction.guild_id)
         items = service.db.rules(interaction.guild_id)
         text = "\n".join(f"`{i}` {t}" for i, t in items) or "등록된 규칙이 없어요. `/규칙 등록`으로 추가해 보세요."
         await interaction.response.send_message(text[:2000], ephemeral=True)
@@ -545,7 +582,8 @@ def register_commands(bot: ArchiveBot) -> None:
             f"- 보관된 자료: {s['docs']}건\n"
             f"- 재요청·누락: 재요청 메시지 {s['rerequests']}건 + 같은 자료 재업로드 {s['reshares']}건 "
             f"(자료 1건당 {pct(s['rerequests'] + s['reshares'], s['docs'])})\n"
-            f"- AI 태그 수정률: {pct(s['corrected'], s['docs'])} ({s['corrected']}건을 사람이 고침)\n"
+            f"- AI 태그 수정률: 공유 의도 {pct(s['corrected'], s['docs'])} ({s['corrected']}건), "
+            f"주제 태그 {pct(s['tag_corrected'], s['docs'])} ({s['tag_corrected']}건)을 사람이 고침\n"
             f"- 검색 소요 시간(중앙값): {median} — `/찾아줘`부터 공유 버튼까지\n"
             f"- 아카이브 재사용: `/찾아줘` {s['searches']}회, 공유 {s['shares']}회, "
             f"다시 쓰인 자료 {pct(s['reused'], s['docs'])}", ephemeral=True)

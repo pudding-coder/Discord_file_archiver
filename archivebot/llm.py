@@ -25,6 +25,8 @@ class Analysis(BaseModel):
     title: str = Field(description="자료 내용을 드러내는 한국어 제목. 팀 규칙이 있으면 따른다.")
     summary: str = Field(description="무엇에 관한 자료인지 1~2문장 요약")
     tags: list[str] = Field(description="주제 태그 1~3개")
+    tag_confidence: float = Field(
+        description="주제 태그 판단의 확신도 0~1. 여러 주제에 걸치거나 목록에 딱 맞는 태그가 없으면 0.6 이하")
     intent: Intent = Field(description="공유 의도")
     confidence: float = Field(description="공유 의도 판단의 확신도 0~1")
     version_label: str = Field(description="버전·용도 표기 (예: v2, 본선용, 최종). 없으면 빈 문자열")
@@ -75,6 +77,8 @@ SYSTEM = """당신은 팀 디스코드에 올라온 자료를 정리하는 사�
 - competitor: 경쟁 상대·경쟁 제품을 분석하거나 경계하려고 공유한 자료
 - feedback: 팀원에게 검토·의견을 구하는 우리 팀 작업물 (초안, 수정본)
 - submission: 대회·수업·고객 등 외부에 제출하거나 발표할 최종 산출물
+
+tag_confidence는 주제 태그에 대한 확신입니다. 내용이 여러 주제에 걸치거나 본문을 거의 못 읽었으면 낮게 주세요.
 
 confidence는 intent 판단에 대한 확신입니다. 대화 맥락이 의도를 분명히 말해 주면 높게, \
 자료만으로 추측했거나 두 의도 사이에서 갈리면 0.6 이하로 솔직하게 주세요. \
@@ -291,6 +295,7 @@ class HeuristicAnalyzer:
             title=stem[:80],
             summary=(text[:140] + "…") if len(text) > 140 else (text or "본문을 읽지 못한 자료입니다."),
             tags=tags or ["기타"],
+            tag_confidence=0.6 if tags else 0.3,
             intent=intent,  # type: ignore[arg-type]
             confidence=confidence,
             version_label=label.group(1) if label else "",
