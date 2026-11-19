@@ -57,7 +57,6 @@ class Config:
     gemini_model: str = "gemini-flash-latest"
     anthropic_api_key: str = ""
     model: str = "claude-opus-5-5"
-    guild_ids: list[int] = field(default_factory=list)
     data_dir: Path = Path("./data")
     archive_dir: Path = Path("./data/archive")
     archive_base_url: str = ""
@@ -92,7 +91,6 @@ class Config:
             discord_token=env("DISCORD_TOKEN", ""),
             anthropic_api_key=anthropic_key,
             model=env("ANTHROPIC_MODEL") or "claude-opus-5-5",
-            guild_ids=[int(g) for g in _csv(env("GUILD_IDS", ""))],
             data_dir=data_dir,
             archive_dir=Path(env("ARCHIVE_DIR") or data_dir / "archive"),
             archive_base_url=(env("ARCHIVE_BASE_URL") or "").rstrip("/"),

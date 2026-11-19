@@ -281,3 +281,22 @@ async def test_title_button_opens_modal_and_saves(config, service, src):
     updated = service.db.get_doc(doc["id"])
     assert updated["title"] == "본선 IR 최종" and "본선 IR 최종" in sent["edit"]["content"]
     assert service.db.audit_for(doc["id"])[-1]["action"] == "title"
+
+
+async def test_commands_register_per_server_and_on_join(config, service):
+    import discord
+
+    bot = ArchiveBot(config, service)
+    synced, copied = [], []
+
+    async def sync(guild=None):
+        if guild.id == 3:
+            raise discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "Missing Access")
+        synced.append(guild.id)
+
+    bot.tree.sync = sync
+    bot.tree.copy_global_to = lambda guild: copied.append(guild.id)
+    assert await bot.register_commands(SimpleNamespace(id=1, name="8조"))
+    await bot.on_guild_join(SimpleNamespace(id=2, name="새 서버"))
+    assert not await bot.register_commands(SimpleNamespace(id=3, name="권한 없음"))   # 멈추지 않고 넘어감
+    assert synced == [1, 2] and copied == [1, 2, 3]

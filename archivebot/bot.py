@@ -314,16 +314,35 @@ class ArchiveBot(discord.Client):
         if self.service.sync is not None:
             self.service.sync.guild_name = lambda gid: getattr(self.get_guild(gid), "name", None) or str(gid)
             self._drive_task = asyncio.create_task(self.service.sync.run_forever())
-        if self.config.guild_ids:
-            for gid in self.config.guild_ids:
-                guild = discord.Object(id=gid)
-                self.tree.copy_global_to(guild=guild)
-                await self.tree.sync(guild=guild)
-        else:
-            await self.tree.sync()
 
     async def on_ready(self) -> None:
         log.info("로그인: %s (서버 %d곳)", self.user, len(self.guilds))
+        if getattr(self, "_commands_synced", False):
+            return   # 연결이 끊겼다 다시 붙을 때도 on_ready가 오므로 처음 한 번만
+        self._commands_synced = True
+        # 명령은 서버마다 등록한다: 바로 뜨고, 초대만 하면 새 서버에도 자동으로 생긴다.
+        # 예전에 전역으로 등록된 명령이 있으면 두 번씩 보이므로 지운다.
+        try:
+            await self.http.bulk_upsert_global_commands(self.application_id, payload=[])
+        except discord.HTTPException:
+            log.warning("전역 명령을 정리하지 못했습니다", exc_info=True)
+        for guild in self.guilds:
+            await self.register_commands(guild)
+
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        log.info("새 서버에 들어왔습니다: %s", guild.name)
+        await self.register_commands(guild)
+
+    async def register_commands(self, guild: discord.abc.Snowflake) -> bool:
+        try:
+            self.tree.copy_global_to(guild=guild)
+            await self.tree.sync(guild=guild)
+            log.info("명령 등록: %s", getattr(guild, "name", guild.id))
+            return True
+        except discord.HTTPException:
+            # 권한이 없는 서버 하나 때문에 봇 전체가 멈추지 않게 한다
+            log.warning("서버 %s에 명령을 등록하지 못했습니다 (봇을 다시 초대해 보세요)", guild.id, exc_info=True)
+            return False
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or message.guild is None:
