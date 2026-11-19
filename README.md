@@ -88,11 +88,11 @@ docker run -d --env-file .env -v "$(pwd)/data:/app/data" archivebot
 
 | 항목 | 기본값 | 설명 |
 |---|---|---|
-| `ARCHIVE_DIR` | `./data/archive` | 사본과 색인이 쌓이는 폴더 |
+| `ARCHIVE_DIR` | `./data/archive` | 봇 컴퓨터에 사본과 색인이 쌓이는 폴더. 그대로 두면 됩니다. |
 | `GOOGLE_CREDENTIALS` | 없음 | 구글 드라이브 연동 토큰 또는 서비스 계정 키 (아래 "구글 드라이브 연결하기") |
 | `GOOGLE_DRIVE_FOLDER_ID` | 없음 | 서비스 계정이 자료를 올릴 공유 드라이브 폴더 ID |
 | `OCR_MAX_PAGES` | `20` | 스캔 PDF에서 AI가 읽는 최대 쪽수 |
-| `ARCHIVE_BASE_URL` | 없음 | 위 폴더의 드라이브 웹 주소. 지정하면 검색 결과에 폴더 링크가 붙습니다. |
+| `ARCHIVE_BASE_URL` | 없음 | 드라이브 연동 없이 위 폴더를 직접 동기화할 때만 쓰는 폴더 웹 주소. 보통 비워 둡니다. |
 | `TOPIC_TAGS` | 기획, 리서치, … | 주제 태그 고정 목록 |
 | `CONFIDENCE_THRESHOLD` | `0.75` | AI 확신도가 이보다 낮으면 버튼으로 확인을 요청합니다. |
 | `CONTEXT_MESSAGES` | `3` | 분류할 때 함께 읽는 직전 메시지 수. `0`이면 읽지 않습니다. |
