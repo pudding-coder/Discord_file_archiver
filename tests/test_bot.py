@@ -134,3 +134,41 @@ async def test_meme_image_gets_no_reaction(config, service):
     msg = FakeMessage("ㅋㅋㅋ", [FakeAttachment("image.png", make_png())])
     await bot.on_message(msg)
     assert msg.reactions == [] and msg.replies == [] and service.db.list_docs(1) == []
+
+
+def test_original_filename_uses_discord_title():
+    from archivebot.bot import original_filename
+
+    att = SimpleNamespace(filename="ee3efaab02cf9918.pdf", title="테스트파일")
+    assert original_filename(att) == "테스트파일.pdf"
+    assert original_filename(SimpleNamespace(filename="ee3e.pdf", title="보고서.pdf")) == "보고서.pdf"
+    assert original_filename(SimpleNamespace(filename="MAP.md", title=None)) == "MAP.md"
+    assert original_filename(SimpleNamespace(filename="MAP.md")) == "MAP.md"
+
+
+async def test_korean_named_pdf_keeps_its_name(config, service):
+    bot = ArchiveBot(config, service)
+    att = FakeAttachment("ee3efaab02cf9918.pdf", make_pdf("x"))
+    att.title = "테스트파일"
+    await bot.on_message(FakeMessage("", [att]))
+    doc = service.db.list_docs(1)[0]
+    assert doc["filename"] == "테스트파일.pdf" and doc["title"] == "테스트파일"
+    assert doc["archive_path"].endswith("_테스트파일.pdf")
+
+
+async def test_markdown_file_is_archived(config, service):
+    bot = ArchiveBot(config, service)
+    msg = FakeMessage("지도", [FakeAttachment("MAP.md", "# 맵 꾸미기 (크리스마스 마켓)\n맵은 Studio에서 만든다.".encode())])
+    await bot.on_message(msg)
+    doc = service.db.list_docs(1)[0]
+    assert msg.reactions == ["📌"] and "크리스마스 마켓" in doc["excerpt"]
+
+
+async def test_forwarded_message_files_are_archived(config, service):
+    bot = ArchiveBot(config, service)
+    msg = FakeMessage("")
+    msg.message_snapshots = [SimpleNamespace(
+        attachments=[FakeAttachment("MAP.md", "# 지도".encode())], content="참고 https://example.com/forwarded")]
+    await bot.on_message(msg)
+    kinds = sorted(d["kind"] for d in service.db.list_docs(1))
+    assert kinds == ["file", "link"] and msg.reactions == ["📌"]

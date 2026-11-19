@@ -21,6 +21,19 @@ REREQUEST_RE = re.compile(r"다시\s*(올려|보내|공유)|어디\s*(있|갔|�
 MAX_ITEMS_PER_MESSAGE = 5
 
 
+def original_filename(att) -> str:
+    """디스코드는 한글 등 영문이 아닌 파일명을 무작위 문자열(filename)로 바꾸고,
+    원래 이름은 title에 따로 준다. 원래 이름을 쓰되 확장자는 filename 쪽을 따른다."""
+    name = att.filename
+    title = (getattr(att, "title", None) or "").strip()
+    if not title:
+        return name
+    ext = extension(name)
+    if ext and extension(title) != ext:
+        title = f"{title}.{ext}"
+    return title
+
+
 # ── 화면 문구 ────────────────────────────────────────────
 def version_text(doc: dict) -> str:
     label = f" {doc['version_label']}" if doc.get("version_label") else ""
@@ -241,9 +254,13 @@ class ArchiveBot(discord.Client):
     async def archive_message(self, message: discord.Message, quiet: bool = False) -> int:
         """메시지의 파일·링크를 보관한다. quiet이면 확인 메시지 없이 반응만 남긴다(과거 기록 수집용)."""
         max_bytes = self.config.max_file_mb * 1024 * 1024
-        attachments = [a for a in message.attachments
+        # 다른 채널에서 "전달"한 메시지는 파일·본문이 스냅샷 안에 들어 있다
+        snapshots = list(getattr(message, "message_snapshots", None) or [])
+        all_attachments = list(message.attachments) + [a for snap in snapshots for a in snap.attachments]
+        attachments = [a for a in all_attachments
                        if extension(a.filename) in self.config.extensions and a.size <= max_bytes]
-        urls = find_urls(message.content or "")
+        text = "\n".join([message.content or "", *(snap.content or "" for snap in snapshots)])
+        urls = find_urls(text)
         if not attachments and not urls:
             return 0   # 파일·링크가 없는 메시지는 읽지도 저장하지도 않는다
 
@@ -255,7 +272,7 @@ class ArchiveBot(discord.Client):
         )
         results: list[IngestResult] = []
         for att in attachments[:MAX_ITEMS_PER_MESSAGE]:
-            result = await self.service.ingest_file(src, att.filename, await att.read(), context)
+            result = await self.service.ingest_file(src, original_filename(att), await att.read(), context)
             if result is not None:   # 밈·짤로 판단한 이미지는 보관하지 않는다
                 results.append(result)
         for url in urls[: max(MAX_ITEMS_PER_MESSAGE - len(attachments), 0)]:
