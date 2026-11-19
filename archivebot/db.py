@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS documents (
     pending_version INTEGER NOT NULL DEFAULT 0,
     excerpt TEXT,
     reuse_count INTEGER NOT NULL DEFAULT 0,
+    drive_file_id TEXT,                          -- 구글 드라이브에 올린 사본
+    drive_url TEXT,
     created_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_doc_sha ON documents(guild_id, sha256);
@@ -51,6 +53,11 @@ CREATE TABLE IF NOT EXISTS rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     guild_id INTEGER NOT NULL, text TEXT NOT NULL,
     created_by TEXT, created_at TEXT NOT NULL
+);
+-- 서버별 설정값 (드라이브 폴더·시트 ID 등)
+CREATE TABLE IF NOT EXISTS settings (
+    guild_id INTEGER NOT NULL, key TEXT NOT NULL, value TEXT,
+    PRIMARY KEY (guild_id, key)
 );
 CREATE TABLE IF NOT EXISTS channel_settings (
     guild_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, collect INTEGER NOT NULL,
@@ -92,7 +99,15 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """이전 버전에서 만든 DB에 새 칸을 더한다."""
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(documents)")}
+        for name in ("drive_file_id", "drive_url"):
+            if name not in cols:
+                self.conn.execute(f"ALTER TABLE documents ADD COLUMN {name} TEXT")
 
     def close(self) -> None:
         self.conn.close()
@@ -141,6 +156,26 @@ class Database:
 
     def bump_reuse(self, doc_id: int) -> None:
         self.conn.execute("UPDATE documents SET reuse_count = reuse_count + 1 WHERE id = ?", (doc_id,))
+        self.conn.commit()
+
+    def docs_without_drive(self, guild_id: int) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM documents WHERE guild_id = ? AND drive_file_id IS NULL ORDER BY id", (guild_id,))
+        return [_doc(r) for r in rows]
+
+    def guilds_without_drive(self) -> list[int]:
+        rows = self.conn.execute("SELECT DISTINCT guild_id FROM documents WHERE drive_file_id IS NULL")
+        return [r[0] for r in rows]
+
+    # ── 서버별 설정값 ─────────────────────────────────────
+    def get_setting(self, guild_id: int, key: str) -> str | None:
+        row = self.conn.execute("SELECT value FROM settings WHERE guild_id = ? AND key = ?", (guild_id, key)).fetchone()
+        return row["value"] if row else None
+
+    def set_setting(self, guild_id: int, key: str, value: str | None) -> None:
+        self.conn.execute(
+            "INSERT INTO settings VALUES (?,?,?) ON CONFLICT(guild_id, key) DO UPDATE SET value = excluded.value",
+            (guild_id, key, value))
         self.conn.commit()
 
     # ── 팀 용어·규칙 ──────────────────────────────────────

@@ -4,3 +4,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .venv/
+google_token.json
+client_secret*.json
+*service-account*.json

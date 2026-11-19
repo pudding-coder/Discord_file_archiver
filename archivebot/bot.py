@@ -1,6 +1,7 @@
 """디스코드 연결부: 메시지 수집, 확인 버튼, 슬래시 명령."""
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import re
@@ -81,7 +82,9 @@ def doc_links(doc: dict, base_url: str) -> list[str]:
         links.append(f"[원문 메시지]({doc['jump_url']})")
     if doc.get("url"):
         links.append(f"[링크 열기]({doc['url']})")
-    if base_url and doc.get("archive_path"):
+    if doc.get("drive_url"):
+        links.append(f"[드라이브에서 열기]({doc['drive_url']})")
+    elif base_url and doc.get("archive_path"):
         links.append(f"[드라이브 폴더]({base_url}) `{doc['archive_path'].split('/', 1)[-1]}`")
     return links
 
@@ -160,7 +163,8 @@ class ShareButton(discord.ui.DynamicItem[discord.ui.Button], template=r"share:(?
             lines.append(" · ".join(links))
         files = []
         # 디스코드 원문이 없는 자료(카톡 등)는 보관해 둔 사본을 직접 올린다
-        if not doc.get("jump_url") and doc["kind"] == "file" and (path := service.archive_file(doc)):
+        if not doc.get("jump_url") and not doc.get("drive_url") and doc["kind"] == "file" \
+                and (path := service.archive_file(doc)):
             if path.stat().st_size <= 10 * 1024 * 1024:
                 files.append(discord.File(path, filename=doc["filename"] or path.name))
         try:
@@ -207,6 +211,9 @@ class ArchiveBot(discord.Client):
 
     async def setup_hook(self) -> None:
         self.add_dynamic_items(IntentButton, VersionButton, ShareButton)
+        if self.service.sync is not None:
+            self.service.sync.guild_name = lambda gid: getattr(self.get_guild(gid), "name", None) or str(gid)
+            self._drive_task = asyncio.create_task(self.service.sync.run_forever())
         if self.config.guild_ids:
             for gid in self.config.guild_ids:
                 guild = discord.Object(id=gid)
@@ -248,8 +255,10 @@ class ArchiveBot(discord.Client):
         )
         results: list[IngestResult] = []
         for att in attachments[:MAX_ITEMS_PER_MESSAGE]:
-            results.append(await self.service.ingest_file(src, att.filename, await att.read(), context))
-        for url in urls[: MAX_ITEMS_PER_MESSAGE - len(results)]:
+            result = await self.service.ingest_file(src, att.filename, await att.read(), context)
+            if result is not None:   # 밈·짤로 판단한 이미지는 보관하지 않는다
+                results.append(result)
+        for url in urls[: max(MAX_ITEMS_PER_MESSAGE - len(attachments), 0)]:
             results.append(await self.service.ingest_link(src, url, context))
         if not results:
             return 0
@@ -458,6 +467,32 @@ def register_commands(bot: ArchiveBot) -> None:
         await interaction.followup.send(
             f"카톡 대화에서 링크 {min(len(links), 50)}개를 찾아 {new}건을 새로 보관했어요.{skipped}\n"
             "내보내기 파일에는 첨부파일이 들어 있지 않아 링크만 가져올 수 있어요.", ephemeral=True)
+
+    @tree.command(name="드라이브", description="자료가 쌓이는 구글 드라이브 폴더와 목록 시트 링크를 봐요.")
+    @guild_only
+    async def drive(interaction: discord.Interaction):
+        sync = service.sync
+        if sync is None:
+            return await interaction.response.send_message(
+                "구글 드라이브가 연결되어 있지 않아요. 봇을 실행하는 사람이 `.env`에 `GOOGLE_CREDENTIALS`를 넣으면 "
+                "자료가 드라이브 폴더와 시트에 자동으로 쌓여요.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        if sync.links(interaction.guild_id)["folder"] is None or sync.links(interaction.guild_id)["pending"]:
+            try:
+                await sync.sync_guild(interaction.guild_id)
+            except Exception:
+                log.exception("드라이브 동기화 실패")
+        links = sync.links(interaction.guild_id)
+        if links["folder"] is None:
+            return await interaction.followup.send(
+                "드라이브 폴더를 만들지 못했어요. 봇 실행 기록(로그)에서 구글 인증 오류를 확인해 주세요.", ephemeral=True)
+        lines = [f"📁 [자료 폴더]({links['folder']})"]
+        if links["sheet"]:
+            lines.append(f"📊 [자료 목록 시트]({links['sheet']}) — 봇이 계속 덮어쓰니 수정은 `/수정`으로 해 주세요.")
+        if links["pending"]:
+            lines.append(f"⏳ 아직 올리지 못한 자료 {links['pending']}건은 잠시 후 다시 올려요.")
+        lines.append("이 폴더를 ChatGPT나 Claude의 구글 드라이브 연결에 추가하면 AI가 팀 자료를 바로 읽어요.")
+        await interaction.followup.send("\n".join(lines), ephemeral=True, suppress_embeds=True)
 
     @tree.command(name="통계", description="자료 보관·검색 지표를 봐요.")
     @app_commands.rename(days="기간")

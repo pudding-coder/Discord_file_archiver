@@ -25,10 +25,22 @@ def main() -> None:
         analyzer = ClaudeAnalyzer(config.anthropic_api_key, config.model)
         log.info("AI 분류: %s", config.model)
     else:
-        log.warning("ANTHROPIC_API_KEY가 없어 키워드 기반 간이 분류로 동작합니다 (모든 자료에 확인 버튼이 뜹니다).")
+        log.warning("ANTHROPIC_API_KEY가 없어 키워드 기반 간이 분류로 동작합니다 "
+                    "(모든 자료에 확인 버튼이 뜨고, 이미지·스캔 PDF는 읽지 못합니다).")
 
     config.archive_dir.mkdir(parents=True, exist_ok=True)
     service = ArchiveService(config, Database(config.db_path), analyzer)
+
+    if config.google_credentials:
+        from .gdrive import GoogleSync
+
+        try:
+            service.sync = GoogleSync.from_config(service, config)
+            log.info("구글 드라이브·시트 연동을 켰습니다.")
+        except Exception as e:
+            log.error("구글 드라이브 연동을 켜지 못했습니다 (봇은 드라이브 없이 계속 동작합니다): %s", e)
+    else:
+        log.info("GOOGLE_CREDENTIALS가 없어 구글 드라이브 연동 없이 동작합니다.")
 
     from .bot import ArchiveBot
 

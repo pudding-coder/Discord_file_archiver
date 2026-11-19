@@ -13,7 +13,7 @@ INTENTS: dict[str, tuple[str, str]] = {
 }
 
 DEFAULT_TAGS = "기획,리서치,디자인,개발,발표,회의록,재무,마케팅,기타"
-DEFAULT_EXTS = "pdf,pptx,ppt,docx,doc,xlsx,xls,hwp,hwpx,txt,md,csv,key,zip"
+DEFAULT_EXTS = "pdf,pptx,ppt,docx,doc,xlsx,xls,hwp,hwpx,txt,md,csv,key,zip,png,jpg,jpeg,webp"
 
 
 def intent_label(intent: str) -> str:
@@ -40,6 +40,9 @@ class Config:
     prompt_ttl: int = 600
     max_file_mb: int = 25
     extensions: set[str] = field(default_factory=lambda: set(_csv(DEFAULT_EXTS)))
+    ocr_max_pages: int = 20
+    google_credentials: str = ""      # 서비스 계정 키 또는 OAuth 토큰 (JSON 문자열이나 파일 경로)
+    google_folder_id: str = ""        # 자료를 올릴 드라이브 폴더 ID (서비스 계정이면 필수)
 
     @property
     def db_path(self) -> Path:
@@ -63,4 +66,7 @@ class Config:
             prompt_ttl=int(env("PROMPT_TTL") or 600),
             max_file_mb=int(env("MAX_FILE_MB") or 25),
             extensions={e.lower().lstrip(".") for e in _csv(env("ARCHIVE_EXTENSIONS") or DEFAULT_EXTS)},
+            ocr_max_pages=int(env("OCR_MAX_PAGES") or 20),
+            google_credentials=(env("GOOGLE_CREDENTIALS") or "").strip(),
+            google_folder_id=(env("GOOGLE_DRIVE_FOLDER_ID") or "").strip(),
         )

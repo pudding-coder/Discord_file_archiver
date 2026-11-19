@@ -14,11 +14,13 @@ from pathlib import Path
 from . import search as lexical
 from .config import INTENTS, Config
 from .db import Database
-from .extract import LinkContent, extract_file_text, fetch_link
+from .extract import (IMAGE_EXTS, LinkContent, extension, extract_file_text, fetch_link, pdf_needs_ocr,
+                      prepare_image, trim_pdf)
 from .llm import Analysis, AnalyzeInput, HeuristicAnalyzer
 
 log = logging.getLogger(__name__)
 
+OCR_MAX_BYTES = 20 * 1024 * 1024   # Claude 요청 한도(32MB)를 base64로 넘지 않게
 VERSION_CANDIDATE_MIN = 0.45   # 이 이상 비슷해야 버전 후보로 AI에게 보여 준다
 EXCERPT_CHARS = 4000
 
@@ -62,15 +64,32 @@ class ArchiveService:
         self.fallback = HeuristicAnalyzer()
         self.fetch_link = link_fetcher
         self._locks: dict[int, asyncio.Lock] = {}
+        self.sync = None   # GoogleSync: 설정되어 있으면 변경이 생길 때마다 드라이브·시트에 반영
 
     # ── 보관 ─────────────────────────────────────────────
-    async def ingest_file(self, src: Source, filename: str, data: bytes, context: list[str]) -> IngestResult:
+    async def ingest_file(self, src: Source, filename: str, data: bytes, context: list[str]) -> IngestResult | None:
+        """파일을 보관한다. 보관하지 않은 경우(읽을 수 없는 이미지, 밈·짤) None."""
+        ext = extension(filename)
+        is_image = ext in IMAGE_EXTS
+        vision = getattr(self.analyzer, "vision", False)
+        if is_image and not vision:
+            return None   # 이미지는 AI가 읽어 보고 자료인지 판단할 수 있을 때만 보관한다
         sha = hashlib.sha256(data).hexdigest()
         async with self._lock(src.guild_id):
             if dup := self._duplicate(src, sha):
                 return dup
             text = await asyncio.to_thread(extract_file_text, filename, data)
-            return await self._store(src, "file", filename, None, sha, text, data, context)
+            attachment = None
+            if is_image:
+                attachment = await asyncio.to_thread(prepare_image, data)
+                if attachment is None:
+                    return None
+            elif vision and ext == "pdf" and await asyncio.to_thread(pdf_needs_ocr, data, text):
+                trimmed = await asyncio.to_thread(trim_pdf, data, self.config.ocr_max_pages)
+                if len(trimmed) <= OCR_MAX_BYTES:
+                    attachment = ("application/pdf", trimmed)
+            return await self._store(src, "file", filename, None, sha, text, data, context,
+                                     attachment=attachment, is_image=is_image)
 
     async def ingest_link(self, src: Source, url: str, context: list[str]) -> IngestResult:
         sha = hashlib.sha256(url.encode()).hexdigest()
@@ -95,19 +114,27 @@ class ArchiveService:
         return IngestResult(doc=existing, duplicate=True)
 
     async def _store(self, src: Source, kind: str, name: str, url: str | None, sha: str,
-                     text: str, data: bytes, context: list[str]) -> IngestResult:
+                     text: str, data: bytes, context: list[str],
+                     attachment: tuple[str, bytes] | None = None, is_image: bool = False) -> IngestResult | None:
         guild = src.guild_id
-        candidates = self._version_candidates(guild, name, text)
+        # 이미지 이름은 대개 image.png 같은 기본값이라 이름으로 버전을 찾으면 엉뚱하게 묶인다
+        candidates = [] if is_image else self._version_candidates(guild, name, text)
         item = AnalyzeInput(
             kind=kind, name=name, text=text, context=context, candidates=candidates,
             glossary=self.db.glossary(guild), rules=[t for _, t in self.db.rules(guild)],
-            topic_tags=self.config.topic_tags,
+            topic_tags=self.config.topic_tags, attachment=attachment,
         )
         try:
             analysis: Analysis = await self.analyzer.analyze(item)
         except Exception:
             log.exception("AI 분류 실패 — 간이 분류로 대체합니다: %s", name)
+            if is_image:
+                return None   # 읽어 보지 못한 이미지는 자료인지 알 수 없어 보관하지 않는다
             analysis = await self.fallback.analyze(item)
+        if is_image and not analysis.is_material:
+            return None
+        if attachment and analysis.text_excerpt.strip():
+            text = analysis.text_excerpt.strip()   # AI가 읽은 글자를 검색용 본문으로 쓴다
 
         intent = analysis.intent if analysis.intent in INTENTS else "reference"
         confidence = min(max(float(analysis.confidence), 0.0), 1.0)
@@ -262,22 +289,28 @@ class ArchiveService:
         return path if path.is_file() else None
 
     # ── AI 연결용 색인·내보내기 ───────────────────────────
-    def export_csv(self, guild_id: int) -> str:
-        buf = io.StringIO()
-        w = csv.writer(buf)
-        w.writerow(["id", "날짜", "제목", "공유 의도", "의도 출처", "태그", "버전", "버전 표기", "바뀐 점",
-                    "요약", "올린이", "출처", "종류", "파일명", "링크", "원문 메시지", "사본 경로", "재사용 횟수"])
+    EXPORT_HEADER = ["id", "날짜", "제목", "공유 의도", "의도 출처", "태그", "버전", "버전 표기", "바뀐 점",
+                     "요약", "올린이", "출처", "종류", "파일명", "링크", "원문 메시지", "드라이브", "사본 경로",
+                     "재사용 횟수"]
+
+    def export_rows(self, guild_id: int) -> list[list]:
+        rows: list[list] = [list(self.EXPORT_HEADER)]
         for d in reversed(self.db.list_docs(guild_id)):
-            w.writerow([
+            rows.append([
                 d["id"], d["created_at"][:10], d["title"], INTENTS.get(d["intent"], (d["intent"],))[0],
                 "사람" if d["intent_source"] == "user" else "AI", ", ".join(d["tags"]),
                 f"v{d['version_no']}", d["version_label"] or "", d["change_note"] or "", d["summary"],
                 d["author_name"], d["source"], d["kind"], d["filename"] or "", d["url"] or "",
-                d["jump_url"] or "", d["archive_path"] or "", d["reuse_count"],
+                d["jump_url"] or "", d.get("drive_url") or "", d["archive_path"] or "", d["reuse_count"],
             ])
+        return rows
+
+    def export_csv(self, guild_id: int) -> str:
+        buf = io.StringIO()
+        csv.writer(buf).writerows(self.export_rows(guild_id))
         return buf.getvalue()
 
-    def refresh_index(self, guild_id: int) -> None:
+    def refresh_index(self, guild_id: int, schedule_sync: bool = True) -> None:
         """아카이브 폴더에 INDEX.md·index.csv를 다시 쓴다. 이 폴더를 GPT·Claude에 연결하면
         AI가 색인을 읽고 필요한 자료를 바로 찾을 수 있다."""
         try:
@@ -304,6 +337,8 @@ class ArchiveService:
                     lines.append(f"- 파일: {d['archive_path'].split('/', 1)[-1]}")
                 if d["url"]:
                     lines.append(f"- 링크: {d['url']}")
+                if d.get("drive_url"):
+                    lines.append(f"- 드라이브: {d['drive_url']}")
                 lines.append("")
             terms = self.db.glossary(guild_id)
             if terms:
@@ -312,3 +347,5 @@ class ArchiveService:
             (root / "index.csv").write_text(self.export_csv(guild_id), encoding="utf-8-sig")
         except OSError:
             log.exception("색인 파일을 쓰지 못했습니다")
+        if schedule_sync and self.sync is not None:
+            self.sync.schedule(guild_id)

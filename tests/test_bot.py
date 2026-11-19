@@ -117,3 +117,20 @@ async def test_panels_render(config, service, src):
     assert "v1 IR_v1" in render_info(service, done)
     hit = render_hit(1, SearchHit(doc=v1, latest=v2), "https://drive.example/folder")
     assert "최신본이 아니에요" in hit and "원문 메시지" in hit and "드라이브 폴더" in hit
+
+
+def test_drive_link_replaces_folder_link(config, service):
+    doc = {"jump_url": "https://discord.com/x", "url": None, "drive_url": "https://drive.google.com/file/d/1/view",
+           "archive_path": "1/2026-11/a.pdf"}
+    links = render_hit.__globals__["doc_links"](doc, "https://drive.example/folder")
+    assert any("드라이브에서 열기" in l for l in links) and not any("드라이브 폴더" in l for l in links)
+
+
+async def test_meme_image_gets_no_reaction(config, service):
+    from tests.test_service import ScriptedAnalyzer, make_png
+
+    service.analyzer = ScriptedAnalyzer(is_material=False)
+    bot = ArchiveBot(config, service)
+    msg = FakeMessage("ㅋㅋㅋ", [FakeAttachment("image.png", make_png())])
+    await bot.on_message(msg)
+    assert msg.reactions == [] and msg.replies == [] and service.db.list_docs(1) == []

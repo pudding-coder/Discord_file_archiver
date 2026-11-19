@@ -5,6 +5,7 @@ ClaudeAnalyzer가 기본이고, API 키가 없거나 호출이 실패하면 Heur
 """
 from __future__ import annotations
 
+import base64
 import logging
 import re
 from dataclasses import dataclass, field
@@ -29,6 +30,11 @@ class Analysis(BaseModel):
     version_label: str = Field(description="버전·용도 표기 (예: v2, 본선용, 최종). 없으면 빈 문자열")
     previous_version_id: int = Field(description="이 자료가 후보 중 어느 자료의 새 버전이면 그 id, 아니면 0")
     change_note: str = Field(description="이전 버전에서 바뀐 점 한 줄. 새 버전이 아니면 빈 문자열")
+    text_excerpt: str = Field(
+        description="첨부된 PDF·이미지에서 직접 읽은 글자 중 검색에 쓸 핵심 내용(최대 1500자). "
+        "본문이 <document> 안에 글자로 이미 주어졌으면 빈 문자열")
+    is_material: bool = Field(
+        description="팀 작업에 쓰일 자료인가. 밈·짤·잡담용 사진처럼 보관할 가치가 없으면 false")
 
 
 class SearchPick(BaseModel):
@@ -50,6 +56,7 @@ class AnalyzeInput:
     glossary: list[tuple[str, str]] = field(default_factory=list)
     rules: list[str] = field(default_factory=list)
     topic_tags: list[str] = field(default_factory=list)
+    attachment: tuple[str, bytes] | None = None             # (media_type, 원본) — 스캔 PDF·이미지
 
 
 def clip(text: str, limit: int = MAX_DOC_CHARS) -> str:
@@ -76,6 +83,10 @@ confidence는 intent 판단에 대한 확신입니다. 대화 맥락이 의도�
 버전 판단: 후보 자료 중 이 자료와 같은 문서의 이전 버전(수정본, 예선본→본선본 등)이 있으면 \
 previous_version_id에 그 id를 넣고 change_note에 바뀐 점을 한 줄로 쓰세요. \
 주제만 비슷한 별개 자료라면 0입니다.
+
+스캔 PDF나 이미지가 첨부되면 직접 읽고, 읽은 글자 중 검색에 쓸 핵심을 text_excerpt에 옮겨 적으세요. \
+이미지가 밈·짤·잡담용 사진이면 is_material을 false로 주세요. 화면 캡처라도 표·슬라이드·문서·디자인 시안처럼 \
+팀 작업에 쓰일 내용이면 자료입니다. 문서 파일과 링크는 거의 항상 자료입니다.
 
 팀 용어 사전과 팀 규칙이 주어지면 제목·태그·요약에 그대로 반영하세요. \
 태그는 주제 태그 목록에서 고르되, 팀 규칙이 다른 태그를 지정하면 규칙이 우선입니다.
@@ -114,10 +125,28 @@ def build_analyze_prompt(item: AnalyzeInput) -> str:
         ]
         parts.append("<candidates>\n" + "\n".join(lines) + "\n</candidates>")
     kind = "파일" if item.kind == "file" else "링크"
-    body = clip(item.text) if item.text.strip() else "(본문을 읽지 못했습니다. 이름과 대화 맥락으로 판단하세요.)"
+    if item.attachment:
+        what = "이미지" if item.attachment[0].startswith("image/") else "스캔 PDF"
+        body = f"(본문은 위에 첨부한 {what}입니다. 직접 읽어 주세요.)"
+    elif item.text.strip():
+        body = clip(item.text)
+    else:
+        body = "(본문을 읽지 못했습니다. 이름과 대화 맥락으로 판단하세요.)"
     parts.append(f'<document kind="{kind}" name="{item.name}">\n{body}\n</document>')
     parts.append("이 자료를 정리해 주세요.")
     return "\n\n".join(parts)
+
+
+def build_analyze_content(item: AnalyzeInput) -> list[dict]:
+    """첨부 원본(있으면)을 먼저, 그다음 지시문을 둔다."""
+    content: list[dict] = []
+    if item.attachment:
+        media_type, data = item.attachment
+        source = {"type": "base64", "media_type": media_type, "data": base64.b64encode(data).decode()}
+        kind = "image" if media_type.startswith("image/") else "document"
+        content.append({"type": kind, "source": source})
+    content.append({"type": "text", "text": build_analyze_prompt(item)})
+    return content
 
 
 def build_search_prompt(query: str, docs: list[dict], glossary: list[tuple[str, str]]) -> str:
@@ -141,6 +170,7 @@ def build_search_prompt(query: str, docs: list[dict], glossary: list[tuple[str, 
 
 class ClaudeAnalyzer:
     semantic = True   # 표현이 달라도 뜻으로 고를 수 있다
+    vision = True     # 스캔 PDF·이미지를 직접 읽을 수 있다
 
     def __init__(self, api_key: str, model: str):
         from anthropic import AsyncAnthropic
@@ -148,7 +178,7 @@ class ClaudeAnalyzer:
         self.client = AsyncAnthropic(api_key=api_key)
         self.model = model
 
-    async def _parse(self, system: str, prompt: str, schema: type[BaseModel]):
+    async def _parse(self, system: str, prompt: str | list[dict], schema: type[BaseModel]):
         response = await self.client.beta.messages.parse(
             model=self.model,
             max_tokens=8000,
@@ -165,7 +195,7 @@ class ClaudeAnalyzer:
         return response.parsed_output
 
     async def analyze(self, item: AnalyzeInput) -> Analysis:
-        return await self._parse(SYSTEM, build_analyze_prompt(item), Analysis)
+        return await self._parse(SYSTEM, build_analyze_content(item), Analysis)
 
     async def pick(self, query: str, docs: list[dict], glossary: list[tuple[str, str]]) -> list[tuple[int, str]]:
         result = await self._parse(SEARCH_SYSTEM, build_search_prompt(query, docs, glossary), SearchPicks)
@@ -185,6 +215,7 @@ class HeuristicAnalyzer:
     """API 없이 돌아가는 간이 분류기. 정확도가 낮으므로 확신도를 낮게 줘서 항상 확인을 받는다."""
 
     semantic = False
+    vision = False
 
     async def analyze(self, item: AnalyzeInput) -> Analysis:
         from .search import normalize
@@ -209,6 +240,8 @@ class HeuristicAnalyzer:
             version_label=label.group(1) if label else "",
             previous_version_id=int(prev["id"]) if prev else 0,
             change_note="이름이나 내용이 비슷한 이전 자료가 있어요." if prev else "",
+            text_excerpt="",
+            is_material=True,
         )
 
     async def pick(self, query: str, docs: list[dict], glossary: list[tuple[str, str]]) -> list[tuple[int, str]]:

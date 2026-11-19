@@ -8,6 +8,7 @@ from tests.conftest import make_pdf
 class ScriptedAnalyzer:
     """정해 둔 답을 돌려주는 가짜 AI. 받은 입력을 기록한다."""
     semantic = True
+    vision = True
 
     def __init__(self, **overrides):
         self.overrides = overrides
@@ -17,7 +18,7 @@ class ScriptedAnalyzer:
     async def analyze(self, item):
         self.inputs.append(item)
         base = dict(title=item.name, summary="요약", tags=["기획"], intent="reference", confidence=0.9,
-                    version_label="", previous_version_id=0, change_note="")
+                    version_label="", previous_version_id=0, change_note="", text_excerpt="", is_material=True)
         over = self.overrides(item) if callable(self.overrides) else self.overrides
         return Analysis(**{**base, **over})
 
@@ -153,3 +154,74 @@ async def test_export_csv(service, src):
     await service.ingest_file(src, "자료.pdf", make_pdf("x"), [])
     rows = service.export_csv(1).splitlines()
     assert rows[0].startswith("id,날짜,제목") and "자료" in rows[1]
+
+
+# ── OCR (스캔 PDF·이미지) ─────────────────────────────────
+def make_png(size=(40, 30), color=(200, 30, 30)) -> bytes:
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def blank_pdf(pages: int) -> bytes:
+    import io
+
+    from pypdf import PdfWriter
+
+    w = PdfWriter()
+    for _ in range(pages):
+        w.add_blank_page(width=200, height=200)
+    buf = io.BytesIO()
+    w.write(buf)
+    return buf.getvalue()
+
+
+async def test_scanned_pdf_is_sent_to_ai_and_excerpt_is_searchable(service, src):
+    ai = ScriptedAnalyzer(text_excerpt="2026 본선 발표 자료 매출 계획")
+    service.analyzer = ai
+    service.config.ocr_max_pages = 2
+    doc = (await service.ingest_file(src, "scan.pdf", blank_pdf(5), [])).doc
+    media_type, sent = ai.inputs[0].attachment
+    from archivebot.extract import pdf_page_count
+    assert media_type == "application/pdf" and pdf_page_count(sent) == 2     # 앞 2쪽만 보냄
+    assert doc["excerpt"] == "2026 본선 발표 자료 매출 계획"
+    from archivebot.llm import HeuristicAnalyzer
+    service.analyzer = HeuristicAnalyzer()     # 글자 검색만으로도 AI가 읽은 본문이 찾아지는지
+    _, hits = await service.search(1, 7, "매출 계획")
+    assert hits and hits[0].doc["id"] == doc["id"]
+
+
+async def test_text_pdf_is_not_sent_as_attachment(service, src):
+    ai = ScriptedAnalyzer()
+    service.analyzer = ai
+    await service.ingest_file(src, "a.pdf", make_pdf("This PDF already has plenty of real text inside it"), [])
+    assert ai.inputs[0].attachment is None
+
+
+async def test_image_material_is_archived_and_meme_is_not(service, src):
+    service.analyzer = ScriptedAnalyzer(text_excerpt="경쟁사 요금표", is_material=True)
+    doc = (await service.ingest_file(src, "image.png", make_png(), [])).doc
+    assert doc["excerpt"] == "경쟁사 요금표"
+    assert service.analyzer.inputs[0].attachment[0] == "image/png"
+    assert service.analyzer.inputs[0].candidates == []          # 이미지는 이름으로 버전을 찾지 않음
+
+    service.analyzer = ScriptedAnalyzer(is_material=False)
+    assert await service.ingest_file(src, "image.png", make_png(color=(1, 2, 3)), []) is None
+    assert len(service.db.list_docs(1)) == 1
+
+
+async def test_images_are_skipped_without_vision_or_when_ai_fails(service, src):
+    assert await service.ingest_file(src, "photo.jpg", make_png(), []) is None   # 간이 분류: 이미지 못 읽음
+
+    class Broken(ScriptedAnalyzer):
+        async def analyze(self, item):
+            raise RuntimeError("down")
+
+    service.analyzer = Broken()
+    assert await service.ingest_file(src, "photo.png", make_png(), []) is None
+    assert await service.ingest_file(src, "broken.png", b"not an image", []) is None
+    assert service.db.list_docs(1) == []

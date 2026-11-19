@@ -4,3 +4,13 @@ pydantic>=2
 pypdf>=4
 aiohttp>=3.9
 python-dotenv>=1.0
+# 문서 본문 추출
+python-docx>=1.1
+python-pptx>=1.0
+openpyxl>=3.1
+olefile>=0.47
+Pillow>=10
+# 구글 드라이브·시트 연동
+google-api-python-client>=2.100
+google-auth>=2.20
+google-auth-oauthlib>=1.2
