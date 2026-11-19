@@ -11,7 +11,6 @@ from discord import app_commands
 
 from .config import INTENTS, Config, intent_label
 from .extract import extension, find_urls
-from .kakao import parse_export
 from .service import ArchiveService, IngestResult, SearchHit, Source
 
 log = logging.getLogger(__name__)
@@ -194,7 +193,7 @@ class ShareButton(discord.ui.DynamicItem[discord.ui.Button], template=r"share:(?
         if links:
             lines.append(" · ".join(links))
         files = []
-        # 디스코드 원문이 없는 자료(카톡 등)는 보관해 둔 사본을 직접 올린다
+        # 디스코드 원문 링크가 없는 자료는 보관해 둔 사본을 직접 올린다
         if not doc.get("jump_url") and not doc.get("drive_url") and doc["kind"] == "file" \
                 and (path := service.archive_file(doc)):
             if path.stat().st_size <= 10 * 1024 * 1024:
@@ -510,31 +509,6 @@ def register_commands(bot: ArchiveBot) -> None:
             except Exception:
                 log.exception("과거 메시지 처리 실패: %s", message.jump_url)
         await interaction.followup.send(f"최근 메시지 {limit}개를 훑어 자료 {count}건을 새로 보관했어요.", ephemeral=True)
-
-    @tree.command(name="카톡가져오기", description="카카오톡 '대화 내보내기' 텍스트 파일에서 링크를 가져와요.")
-    @app_commands.rename(file="파일")
-    @app_commands.describe(file="카카오톡 대화 내보내기로 만든 .txt 파일")
-    @guild_only
-    async def kakao_import(interaction: discord.Interaction, file: discord.Attachment):
-        if extension(file.filename) != "txt" or file.size > 5 * 1024 * 1024:
-            return await interaction.response.send_message("5MB 이하의 .txt 내보내기 파일을 올려 주세요.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        raw = await file.read()
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            text = raw.decode("cp949", errors="replace")
-        links = parse_export(text)
-        new = 0
-        for link in links[:50]:
-            src = Source(guild_id=interaction.guild_id, channel_id=interaction.channel_id, author_name=link.author,
-                         platform="kakao", created_at=f"{link.date}T00:00:00+00:00" if link.date else None)
-            result = await service.ingest_link(src, link.url, [f"{link.author} (카톡): {link.message}"])
-            new += not result.duplicate
-        skipped = f" (링크가 많아 앞의 50개만 처리했어요. 전체 {len(links)}개)" if len(links) > 50 else ""
-        await interaction.followup.send(
-            f"카톡 대화에서 링크 {min(len(links), 50)}개를 찾아 {new}건을 새로 보관했어요.{skipped}\n"
-            "내보내기 파일에는 첨부파일이 들어 있지 않아 링크만 가져올 수 있어요.", ephemeral=True)
 
     @tree.command(name="드라이브", description="자료가 쌓이는 구글 드라이브 폴더와 목록 시트 링크를 봐요.")
     @guild_only

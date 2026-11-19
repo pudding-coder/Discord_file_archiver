@@ -48,7 +48,7 @@ class FakeMessage:
 def test_commands_register(config, service):
     bot = ArchiveBot(config, service)
     names = {c.name for c in bot.tree.get_commands()}
-    assert {"찾아줘", "최근", "수정", "용어", "규칙", "수집", "과거수집", "카톡가져오기", "통계", "내보내기", "자료 정보"} <= names
+    assert {"찾아줘", "최근", "수정", "용어", "규칙", "수집", "과거수집", "통계", "내보내기", "자료 정보"} <= names
     for command in bot.tree.get_commands():
         command.to_dict(bot.tree)   # 디스코드에 보낼 명령 정의가 만들어지는지
 

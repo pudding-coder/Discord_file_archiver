@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS documents (
     message_id INTEGER,
     author_id INTEGER,
     author_name TEXT,
-    source TEXT NOT NULL DEFAULT 'discord',      -- discord | kakao
+    source TEXT NOT NULL DEFAULT 'discord',      -- 자료가 들어온 곳 (현재 discord)
     kind TEXT NOT NULL,                          -- file | link
     filename TEXT,
     url TEXT,                                    -- 링크 원문 주소

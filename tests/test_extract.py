@@ -1,5 +1,4 @@
 from archivebot.extract import _is_public_host, extract_file_text, fetch_link, find_urls, html_to_text
-from archivebot.kakao import parse_export
 from archivebot.llm import AnalyzeInput, build_analyze_prompt, clip
 
 
@@ -27,22 +26,6 @@ async def test_private_addresses_are_blocked():
     assert not await _is_public_host("10.0.0.5")
     assert not (await fetch_link("http://127.0.0.1:8080/admin")).ok
     assert not (await fetch_link("file:///etc/passwd")).ok
-
-
-def test_kakao_pc_and_mobile_formats():
-    pc = """팀플방 님과 카카오톡 대화
---------------- 2026년 11월 16일 월요일 ---------------
-[민수] [오후 3:12] 이거 레퍼런스로 보자
-https://example.com/ref
-[지현] [오후 3:15] ㅇㅋ
-[지현] [오후 3:20] https://example.com/ref https://example.com/two
-"""
-    links = parse_export(pc)
-    assert [(l.url, l.author, l.date) for l in links] == [
-        ("https://example.com/ref", "민수", "2026-11-16"), ("https://example.com/two", "지현", "2026-11-16")]
-    assert "레퍼런스" in links[0].message
-    mobile = "2026년 1월 5일 오후 3:12, 민수 : 참고 https://example.com/m\n"
-    assert [(l.url, l.author, l.date) for l in parse_export(mobile)] == [("https://example.com/m", "민수", "2026-01-05")]
 
 
 def test_prompt_marks_truncation_and_includes_team_context():
