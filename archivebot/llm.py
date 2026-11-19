@@ -1,7 +1,7 @@
 """자료 분류(제목·요약·태그·공유 의도·버전 계보)와 검색 재정렬.
 
-ClaudeAnalyzer가 기본이고, API 키가 없거나 호출이 실패하면 HeuristicAnalyzer(키워드 기반)로
-내려간다. 간이 분류는 확신도를 낮게 주므로 항상 사람에게 버튼으로 확인을 받는다.
+GeminiAnalyzer(무료 API 사용 가능)나 ClaudeAnalyzer를 쓰고, API 키가 없거나 호출이 실패하면
+(무료 한도 초과 포함) HeuristicAnalyzer(키워드 기반)로 내려간다. 간이 분류는 확신도를 낮게 주므로 항상 사람에게 버튼으로 확인을 받는다.
 """
 from __future__ import annotations
 
@@ -200,6 +200,62 @@ class ClaudeAnalyzer:
     async def pick(self, query: str, docs: list[dict], glossary: list[tuple[str, str]]) -> list[tuple[int, str]]:
         result = await self._parse(SEARCH_SYSTEM, build_search_prompt(query, docs, glossary), SearchPicks)
         return [(p.doc_id, p.reason) for p in result.picks[:5]]
+
+
+class GeminiAnalyzer:
+    """Google Gemini API. 무료 등급은 분당·하루 요청 수가 적어서, 한도를 넘으면 예외가 나고
+    서비스가 간이 분류·글자 검색으로 대신한다."""
+
+    semantic = True
+    vision = True
+    max_attachment_bytes = 14 * 1024 * 1024   # 요청 전체 20MB 한도 (첨부는 base64로 33% 커진다)
+
+    def __init__(self, api_key: str, model: str):
+        from google import genai
+
+        self.client = genai.Client(api_key=api_key)
+        self.model = model
+
+    async def _parse(self, system: str, contents: list, schema: type[BaseModel]):
+        from google.genai import types
+
+        response = await self.client.aio.models.generate_content(
+            model=self.model,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=system,
+                response_mime_type="application/json",
+                response_schema=schema,
+                temperature=0.2,
+            ),
+        )
+        parsed = response.parsed
+        if not isinstance(parsed, schema):
+            raise RuntimeError(f"Gemini 응답을 읽지 못했습니다: {str(response.text or '')[:200]}")
+        return parsed
+
+    async def analyze(self, item: AnalyzeInput) -> Analysis:
+        from google.genai import types
+
+        contents: list = []
+        if item.attachment:
+            media_type, data = item.attachment
+            contents.append(types.Part.from_bytes(data=data, mime_type=media_type))
+        contents.append(build_analyze_prompt(item))
+        return await self._parse(SYSTEM, contents, Analysis)
+
+    async def pick(self, query: str, docs: list[dict], glossary: list[tuple[str, str]]) -> list[tuple[int, str]]:
+        result = await self._parse(SEARCH_SYSTEM, [build_search_prompt(query, docs, glossary)], SearchPicks)
+        return [(p.doc_id, p.reason) for p in result.picks[:5]]
+
+
+def make_analyzer(config):
+    """설정에 맞는 AI를 만든다. 키가 없으면 None (간이 분류)."""
+    if config.ai_provider == "gemini" and config.gemini_api_key:
+        return GeminiAnalyzer(config.gemini_api_key, config.gemini_model)
+    if config.ai_provider == "claude" and config.anthropic_api_key:
+        return ClaudeAnalyzer(config.anthropic_api_key, config.model)
+    return None
 
 
 _INTENT_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [

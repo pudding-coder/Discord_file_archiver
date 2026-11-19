@@ -20,7 +20,7 @@ from .llm import Analysis, AnalyzeInput, HeuristicAnalyzer
 
 log = logging.getLogger(__name__)
 
-OCR_MAX_BYTES = 20 * 1024 * 1024   # Claude 요청 한도(32MB)를 base64로 넘지 않게
+OCR_MAX_BYTES = 20 * 1024 * 1024   # AI가 따로 정하지 않았을 때 보낼 수 있는 첨부 최대 크기
 VERSION_CANDIDATE_MIN = 0.45   # 이 이상 비슷해야 버전 후보로 AI에게 보여 준다
 EXCERPT_CHARS = 4000
 
@@ -86,7 +86,7 @@ class ArchiveService:
                     return None
             elif vision and ext == "pdf" and await asyncio.to_thread(pdf_needs_ocr, data, text):
                 trimmed = await asyncio.to_thread(trim_pdf, data, self.config.ocr_max_pages)
-                if len(trimmed) <= OCR_MAX_BYTES:
+                if len(trimmed) <= getattr(self.analyzer, "max_attachment_bytes", OCR_MAX_BYTES):
                     attachment = ("application/pdf", trimmed)
             return await self._store(src, "file", filename, None, sha, text, data, context,
                                      attachment=attachment, is_image=is_image)
@@ -311,7 +311,7 @@ class ArchiveService:
         return buf.getvalue()
 
     def refresh_index(self, guild_id: int, schedule_sync: bool = True) -> None:
-        """아카이브 폴더에 INDEX.md·index.csv를 다시 쓴다. 이 폴더를 GPT·Claude에 연결하면
+        """아카이브 폴더에 INDEX.md·index.csv를 다시 쓴다. 이 폴더를 ChatGPT·Gemini·Claude에 연결하면
         AI가 색인을 읽고 필요한 자료를 바로 찾을 수 있다."""
         try:
             root = self.config.archive_dir / str(guild_id)

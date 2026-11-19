@@ -18,14 +18,13 @@ def main() -> None:
     if not config.discord_token:
         sys.exit("DISCORD_TOKEN이 없습니다. .env.example을 .env로 복사해 토큰을 넣어 주세요.")
 
-    analyzer = None
-    if config.anthropic_api_key:
-        from .llm import ClaudeAnalyzer
+    from .llm import make_analyzer
 
-        analyzer = ClaudeAnalyzer(config.anthropic_api_key, config.model)
-        log.info("AI 분류: %s", config.model)
+    analyzer = make_analyzer(config)
+    if analyzer is not None:
+        log.info("AI 분류: %s (%s)", config.ai_provider, analyzer.model)
     else:
-        log.warning("ANTHROPIC_API_KEY가 없어 키워드 기반 간이 분류로 동작합니다 "
+        log.warning("GEMINI_API_KEY가 없어 키워드 기반 간이 분류로 동작합니다 "
                     "(모든 자료에 확인 버튼이 뜨고, 이미지·스캔 PDF는 읽지 못합니다).")
 
     config.archive_dir.mkdir(parents=True, exist_ok=True)

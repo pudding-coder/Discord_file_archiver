@@ -28,6 +28,9 @@ def _csv(value: str) -> list[str]:
 @dataclass
 class Config:
     discord_token: str = ""
+    ai_provider: str = ""             # gemini | claude | "" (간이 분류)
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-flash-latest"
     anthropic_api_key: str = ""
     model: str = "claude-opus-5-5"
     guild_ids: list[int] = field(default_factory=list)
@@ -52,9 +55,17 @@ class Config:
     def from_env(cls) -> "Config":
         env = os.environ.get
         data_dir = Path(env("DATA_DIR") or "./data")
+        gemini_key = env("GEMINI_API_KEY") or env("GOOGLE_API_KEY") or ""
+        anthropic_key = env("ANTHROPIC_API_KEY", "")
+        provider = (env("AI_PROVIDER") or "").strip().lower()
+        if provider not in ("gemini", "claude"):
+            provider = "gemini" if gemini_key else "claude" if anthropic_key else ""
         return cls(
+            ai_provider=provider,
+            gemini_api_key=gemini_key,
+            gemini_model=env("GEMINI_MODEL") or "gemini-flash-latest",
             discord_token=env("DISCORD_TOKEN", ""),
-            anthropic_api_key=env("ANTHROPIC_API_KEY", ""),
+            anthropic_api_key=anthropic_key,
             model=env("ANTHROPIC_MODEL") or "claude-opus-5-5",
             guild_ids=[int(g) for g in _csv(env("GUILD_IDS", ""))],
             data_dir=data_dir,

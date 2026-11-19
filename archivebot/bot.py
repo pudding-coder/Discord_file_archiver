@@ -491,7 +491,7 @@ def register_commands(bot: ArchiveBot) -> None:
             lines.append(f"📊 [자료 목록 시트]({links['sheet']}) — 봇이 계속 덮어쓰니 수정은 `/수정`으로 해 주세요.")
         if links["pending"]:
             lines.append(f"⏳ 아직 올리지 못한 자료 {links['pending']}건은 잠시 후 다시 올려요.")
-        lines.append("이 폴더를 ChatGPT나 Claude의 구글 드라이브 연결에 추가하면 AI가 팀 자료를 바로 읽어요.")
+        lines.append("이 폴더를 ChatGPT·Gemini·Claude의 구글 드라이브 연결에 추가하면 AI가 팀 자료를 바로 읽어요.")
         await interaction.followup.send("\n".join(lines), ephemeral=True, suppress_embeds=True)
 
     @tree.command(name="통계", description="자료 보관·검색 지표를 봐요.")

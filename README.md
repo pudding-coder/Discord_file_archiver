@@ -10,7 +10,7 @@
 - **버전 계보**: 비슷한 자료가 올라오면 이전 자료의 v2로 연결하고 바뀐 점을 한 줄로 알려 줍니다.
 - **대화 중 검색**: `/찾아줘 질문:본선용 IR 자료` — 채널을 몰라도, 띄어쓰기가 달라도 찾습니다.
 - **팀 용어·규칙**: `/용어 등록`, `/규칙 등록`으로 말로 알려 주면 분류와 검색에 반영합니다.
-- **AI 연결**: 드라이브 폴더를 ChatGPT·Claude에 연결하면 AI가 팀 자료와 목록을 바로 읽습니다.
+- **AI 연결**: 드라이브 폴더를 ChatGPT·Gemini·Claude에 연결하면 AI가 팀 자료와 목록을 바로 읽습니다.
 
 기획 전체는 [docs/기획서.md](docs/기획서.md)에 있습니다.
 
@@ -36,13 +36,21 @@ Python 3.10 이상이 필요합니다.
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env    # DISCORD_TOKEN, ANTHROPIC_API_KEY, GUILD_IDS를 채웁니다
+cp .env.example .env    # DISCORD_TOKEN, GEMINI_API_KEY, GUILD_IDS를 채웁니다
 python -m archivebot
 ```
 
 - `GUILD_IDS`에 서버 ID를 넣으면 슬래시 명령이 바로 등록됩니다. 비우면 전역 등록이라 반영까지 최대 1시간이 걸립니다.
   (서버 ID: 디스코드 설정 → 고급 → 개발자 모드를 켜고 서버 아이콘 우클릭 → ID 복사)
-- `ANTHROPIC_API_KEY`가 없어도 실행됩니다. 이때는 키워드 기반 간이 분류로 동작하고 모든 자료에 확인 버튼이 뜹니다.
+- `GEMINI_API_KEY`는 [Google AI Studio](https://aistudio.google.com/apikey)에서 무료로 발급받습니다.
+- 키가 없어도 실행됩니다. 이때는 키워드 기반 간이 분류로 동작하고, 모든 자료에 확인 버튼이 뜨며, 이미지·스캔 PDF는 읽지 못합니다.
+
+### Gemini 무료 등급에서 알아 둘 것
+
+- **하루·분당 요청 수가 적습니다.** 자료 1건 분류와 `/찾아줘` 1번이 각각 요청 1회입니다. 한도를 넘으면 봇은 멈추지 않고 키워드 기반 분류·글자 검색으로 대신합니다(이미지는 그동안 보관하지 않습니다). 정확한 한도는 [AI Studio](https://aistudio.google.com)의 사용량 화면에서 확인하세요.
+- **무료 등급에 보낸 내용은 Google이 서비스 개선에 쓸 수 있습니다.** Google 약관상 무료 등급 요청은 사람이 검토하거나 모델 개선에 쓰일 수 있으니, 민감한 자료가 올라오는 채널은 `/수집 끄기`로 빼거나 결제 등급을 쓰세요.
+- 모델은 `GEMINI_MODEL`로 바꿉니다. 기본값 `gemini-flash-latest`는 최신 Flash 모델을 가리킵니다.
+- Claude를 쓰고 싶으면 `ANTHROPIC_API_KEY`를 넣고 `AI_PROVIDER=claude`로 바꾸면 됩니다.
 
 Docker로 실행할 수도 있습니다.
 
@@ -88,7 +96,8 @@ docker run -d --env-file .env -v "$(pwd)/data:/app/data" archivebot
 | `TOPIC_TAGS` | 기획, 리서치, … | 주제 태그 고정 목록 |
 | `CONFIDENCE_THRESHOLD` | `0.75` | AI 확신도가 이보다 낮으면 버튼으로 확인을 요청합니다. |
 | `CONTEXT_MESSAGES` | `3` | 분류할 때 함께 읽는 직전 메시지 수. `0`이면 읽지 않습니다. |
-| `ANTHROPIC_MODEL` | `claude-opus-5-5` | 분류·검색에 쓰는 모델 |
+| `GEMINI_MODEL` | `gemini-flash-latest` | 분류·검색에 쓰는 Gemini 모델 |
+| `AI_PROVIDER` | 자동 | `gemini` 또는 `claude`. 비우면 키가 있는 쪽 (둘 다 있으면 Gemini) |
 
 ## 읽을 수 있는 파일
 
@@ -96,11 +105,11 @@ docker run -d --env-file .env -v "$(pwd)/data:/app/data" archivebot
 |---|---|
 | PDF (글자 있음), TXT, MD, CSV | 봇이 직접 읽음 |
 | DOCX, PPTX(발표자 노트·표 포함), XLSX, HWP, HWPX | 봇이 직접 읽음 |
-| 스캔 PDF | 글자가 거의 없으면 앞 20쪽(`OCR_MAX_PAGES`)을 Claude가 읽음 |
-| 이미지 (PNG, JPG, WEBP) | Claude가 읽고, 업무 자료일 때만 보관 (밈·잡담 사진은 무시) |
+| 스캔 PDF | 글자가 거의 없으면 앞 20쪽(`OCR_MAX_PAGES`)을 AI가 읽음 |
+| 이미지 (PNG, JPG, WEBP) | AI가 읽고, 업무 자료일 때만 보관 (밈·잡담 사진은 무시) |
 | DOC, PPT, XLS(옛 형식), 암호·배포용 HWP, KEY, ZIP | 사본만 보관하고 파일명과 대화 맥락으로 분류 |
 
-스캔 PDF와 이미지는 `ANTHROPIC_API_KEY`가 있어야 읽습니다. 쪽·이미지마다 API 비용이 들어서 일반 문서보다 비쌉니다.
+스캔 PDF와 이미지는 AI 키(`GEMINI_API_KEY`)가 있어야 읽습니다. 크기가 큰 요청이라 무료 한도를 빨리 씁니다.
 
 ## 구글 드라이브 연결하기
 
@@ -153,17 +162,18 @@ docker run -d --env-file .env -v "$(pwd)/data:/app/data" archivebot
 
 서비스 계정은 저장 용량이 없어서 개인 "내 드라이브" 폴더에는 파일을 올리지 못합니다. 개인 계정이면 위의 OAuth 방법을 쓰세요.
 
-## GPT·Claude에 연결하기
+## ChatGPT·Gemini·Claude에 연결하기
 
-드라이브를 연결했다면 「팀 자료 아카이브」 폴더를 ChatGPT나 Claude의 구글 드라이브 연결에 추가하면 됩니다. AI가 「팀 자료 목록」 시트로 자료를 찾고 원본을 읽습니다.
+드라이브를 연결했다면 「팀 자료 아카이브」 폴더를 ChatGPT·Gemini·Claude의 구글 드라이브 연결에 추가하면 됩니다. AI가 「팀 자료 목록」 시트로 자료를 찾고 원본을 읽습니다.
 
 드라이브 없이 쓸 때는 `ARCHIVE_DIR/<서버 ID>/` 폴더에 자료 사본과 `INDEX.md`, `index.csv`가 쌓입니다.
 
 ## 개인정보
 
 - 봇은 파일이나 링크가 있는 메시지만 처리합니다. 다른 메시지는 저장하지 않습니다.
-- 자료 본문(스캔 PDF·이미지는 원본)과 직전 대화 몇 줄이 분류를 위해 Claude API로 전송됩니다. 설치 전에 팀원 동의를 받으세요.
-- 이미지는 Claude가 읽어 본 뒤 업무 자료가 아니면 저장하지 않습니다.
+- 자료 본문(스캔 PDF·이미지는 원본)과 직전 대화 몇 줄이 분류를 위해 Gemini API(또는 설정한 AI)로 전송됩니다. 설치 전에 팀원 동의를 받으세요.
+- Gemini 무료 등급에 보낸 내용은 Google이 서비스 개선에 쓸 수 있습니다. 민감한 채널은 수집을 끄세요.
+- 이미지는 AI가 읽어 본 뒤 업무 자료가 아니면 저장하지 않습니다.
 - 민감한 채널은 `/수집 상태:끄기`로 제외합니다.
 - 봇은 원본 메시지를 옮기거나 지우지 않습니다. 메시지 관리 권한을 주지 마세요.
 
@@ -178,7 +188,7 @@ python -m pytest
 |---|---|
 | `archivebot/bot.py` | 디스코드 연결: 메시지 수집, 확인 버튼, 슬래시 명령 |
 | `archivebot/service.py` | 핵심 로직: 보관, 버전 연결, 검색, 수정 기록, 색인 |
-| `archivebot/llm.py` | Claude 분류·검색 재정렬과 키워드 기반 간이 분류 |
+| `archivebot/llm.py` | Gemini·Claude 분류·검색 재정렬과 키워드 기반 간이 분류 |
 | `archivebot/search.py` | 글자 2-gram 어휘 검색, 버전 후보 탐지 |
 | `archivebot/extract.py` | PDF·DOCX·PPTX·XLSX·HWP·HWPX·링크 본문 추출, OCR 준비 |
 | `archivebot/gdrive.py` | 구글 드라이브 업로드·목록 시트 동기화 |

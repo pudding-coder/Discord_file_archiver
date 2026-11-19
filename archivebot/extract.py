@@ -1,7 +1,7 @@
 """파일·링크에서 글자를 뽑는다.
 
 - 글자가 들어 있는 PDF, TXT·MD·CSV, DOCX, PPTX, XLSX, HWPX, HWP(5.0)는 여기서 직접 읽는다.
-- 스캔 PDF와 이미지는 글자가 없으므로 Claude에게 원본을 보여 주고 읽게 한다(OCR).
+- 스캔 PDF와 이미지는 글자가 없으므로 AI(Gemini·Claude)에게 원본을 보여 주고 읽게 한다(OCR).
   여기서는 그 판단(pdf_needs_ocr)과 보낼 원본 준비(trim_pdf, prepare_image)만 한다.
 - 옛 형식(DOC·PPT·XLS)은 읽지 못한다. 사본은 보관하고 파일명과 대화 맥락으로 분류한다.
 """
@@ -30,7 +30,7 @@ TEXT_EXTS = {"txt", "md", "csv"}
 IMAGE_EXTS = {"png", "jpg", "jpeg", "webp", "gif"}
 MAX_TEXT_CHARS = 200_000          # 이보다 긴 본문은 잘라서 보관한다
 MAX_UNZIPPED_BYTES = 50_000_000   # 압축 폭탄 방지
-IMAGE_MAX_SIDE = 1568             # Claude가 권장하는 이미지 긴 변
+IMAGE_MAX_SIDE = 1568             # 이 이상은 AI가 읽는 데 도움이 안 되고 요청만 커진다
 IMAGE_MAX_BYTES = 3_500_000
 MAX_LINK_BYTES = 2_000_000
 
@@ -97,7 +97,7 @@ def pdf_needs_ocr(data: bytes, text: str) -> bool:
     """글자가 거의 없는 PDF = 스캔본이나 이미지로 만든 PDF."""
     pages = pdf_page_count(data)
     if pages == 0:
-        return False   # 열리지 않는 PDF는 Claude도 못 읽는다
+        return False   # 열리지 않는 PDF는 AI도 못 읽는다
     return len(re.sub(r"\s+", "", text)) < 30 * pages
 
 
@@ -117,7 +117,7 @@ def trim_pdf(data: bytes, max_pages: int) -> bytes:
 
 
 def prepare_image(data: bytes) -> tuple[str, bytes] | None:
-    """Claude에 보낼 (media_type, bytes). 너무 크면 줄이고, 열 수 없는 이미지는 None."""
+    """AI에 보낼 (media_type, bytes). 너무 크면 줄이고, 열 수 없는 이미지는 None."""
     from PIL import Image
 
     try:
