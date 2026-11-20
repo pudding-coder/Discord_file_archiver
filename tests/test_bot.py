@@ -318,3 +318,35 @@ async def test_hourglass_shows_while_processing(config, service):
     msg = FakeMessage("", [FakeAttachment("a.pdf", make_pdf("x"))])
     await bot.on_message(msg)
     assert seen == [["⏳"]] and msg.reactions == ["📌"]
+
+
+async def test_share_posts_the_file_itself(config, service, src):
+    from archivebot.bot import ShareButton
+
+    doc = (await service.ingest_file(src, "발표자료.pdf", make_pdf("x"), [])).doc
+    assert doc["jump_url"]                                   # 원문 메시지가 있어도 파일을 올린다
+    posted, replies, deferred = [], [], []
+
+    async def channel_send(content, files=(), **kwargs):
+        posted.append((content, [f.filename for f in files]))
+
+    async def defer(**kwargs):
+        deferred.append(kwargs)
+
+    async def followup_send(content, **kwargs):
+        replies.append(content)
+
+    interaction = SimpleNamespace(
+        client=SimpleNamespace(service=service, config=config),
+        user=SimpleNamespace(id=9, display_name="지현", mention="<@9>"),
+        guild=SimpleNamespace(filesize_limit=10 * 1024 * 1024),
+        channel=SimpleNamespace(send=channel_send),
+        response=SimpleNamespace(defer=defer, send_message=None),
+        followup=SimpleNamespace(send=followup_send))
+    await ShareButton(doc["id"], 0).callback(interaction)
+    assert deferred and posted[0][1] == ["발표자료.pdf"] and "원문 메시지" in posted[0][0]
+    assert replies == ["채널에 공유했어요. (파일 포함)"]
+
+    interaction.guild.filesize_limit = 10                    # 서버 한도보다 크면 링크만
+    await ShareButton(doc["id"], 0).callback(interaction)
+    assert posted[1][1] == [] and "파일이 커서" in posted[1][0]

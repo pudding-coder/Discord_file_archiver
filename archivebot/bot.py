@@ -188,22 +188,29 @@ class ShareButton(discord.ui.DynamicItem[discord.ui.Button], template=r"share:(?
             doc = service.record_share(self.doc_id, interaction.user.id, self.event_id)
         except LookupError as e:
             return await interaction.response.send_message(str(e), ephemeral=True)
+        # 파일을 올리면 3초를 넘길 수 있으니 먼저 "처리 중"으로 응답해 둔다
+        await interaction.response.defer(ephemeral=True, thinking=True)
         lines = [f"🔎 {interaction.user.mention}님이 찾은 자료: {one_line(doc)}", f"> {doc['summary']}"]
         links = doc_links(doc, client.config.archive_base_url)
+        files = []
+        if doc["kind"] == "file" and (path := service.archive_file(doc)):
+            limit = getattr(interaction.guild, "filesize_limit", 10 * 1024 * 1024)
+            if path.stat().st_size <= limit:
+                files.append(discord.File(path, filename=doc["filename"] or path.name))
+            else:
+                lines.append("(파일이 커서 채널에 직접 올리지 못했어요. 아래 링크로 열어 주세요)")
         if links:
             lines.append(" · ".join(links))
-        files = []
-        # 디스코드 원문 링크가 없는 자료는 보관해 둔 사본을 직접 올린다
-        if not doc.get("jump_url") and not doc.get("drive_url") and doc["kind"] == "file" \
-                and (path := service.archive_file(doc)):
-            if path.stat().st_size <= 10 * 1024 * 1024:
-                files.append(discord.File(path, filename=doc["filename"] or path.name))
         try:
             await interaction.channel.send("\n".join(lines), files=files, suppress_embeds=True)  # type: ignore[union-attr]
         except discord.Forbidden:
-            return await interaction.response.send_message(
-                "이 채널에 메시지를 보낼 권한이 없어요. 봇에 '메시지 보내기' 권한을 주세요.", ephemeral=True)
-        await interaction.response.send_message("채널에 공유했어요.", ephemeral=True)
+            return await interaction.followup.send(
+                "이 채널에 메시지나 파일을 보낼 권한이 없어요. 봇에 '메시지 보내기'와 '파일 첨부' 권한을 주세요.",
+                ephemeral=True)
+        except discord.HTTPException:
+            log.exception("공유 실패: 자료 #%s", doc["id"])
+            return await interaction.followup.send("공유하다 문제가 생겼어요. 잠시 후 다시 눌러 주세요.", ephemeral=True)
+        await interaction.followup.send("채널에 공유했어요." + (" (파일 포함)" if files else ""), ephemeral=True)
 
 
 class TagSelect(discord.ui.DynamicItem[discord.ui.Select], template=r"tags:(?P<doc>\d+):(?P<mode>[pi])"):
