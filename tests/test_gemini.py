@@ -147,3 +147,38 @@ def test_pick_flash_model():
 def test_client_uses_v1beta():
     ai = GeminiAnalyzer("test-key", "gemini-2.5-flash")
     assert ai.client._api_client._http_options.api_version == "v1beta"
+
+
+def test_thinking_is_lowered_by_model_family():
+    ai = GeminiAnalyzer("test-key", "gemini-2.5-flash")
+    assert ai.thinking_config().thinking_budget == 0
+    ai.model = "gemini-3-flash-preview"
+    assert ai.thinking_config().thinking_level.lower() == "low"
+    ai.model = "gemini-2.5-pro"
+    assert ai.thinking_config() is None
+    ai.model = "gemini-flash-latest"            # 별칭은 최신 방식으로 시도 (거부되면 기본 설정)
+    assert ai.thinking_config().thinking_level.lower() == "low"
+    ai.model = "some-other-model"
+    assert ai.thinking_config() is None
+
+
+async def test_thinking_setting_rejected_falls_back():
+    from google.genai import errors
+
+    ai = GeminiAnalyzer("test-key", "gemini-2.5-flash")
+    configs = []
+
+    class Models:
+        async def generate_content(self, model, contents, config):
+            configs.append(config.thinking_config)
+            if config.thinking_config is not None:
+                raise errors.ClientError(400, {"error": {"code": 400, "status": "INVALID_ARGUMENT",
+                                                         "message": "thinking_budget is not supported"}})
+            return SimpleNamespace(parsed=ANALYSIS, text="{}")
+
+    ai.client = SimpleNamespace(aio=SimpleNamespace(models=Models()))
+    item = AnalyzeInput(kind="file", name="a.txt", text="본문", topic_tags=["기획"])
+    assert await ai.analyze(item) == ANALYSIS
+    assert configs[0] is not None and configs[1] is None
+    await ai.analyze(item)
+    assert configs[-1] is None                    # 한 번 거부되면 계속 기본 설정

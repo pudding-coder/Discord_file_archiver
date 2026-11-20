@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import re
 
 import discord
@@ -376,13 +377,18 @@ class ArchiveBot(discord.Client):
             author_id=message.author.id, author_name=message.author.display_name,
             jump_url=message.jump_url, created_at=message.created_at.isoformat(timespec="seconds"),
         )
+        try:
+            await message.add_reaction("⏳")   # 바로 알아봤다는 표시. 정리가 끝나면 📌로 바뀐다
+        except discord.HTTPException:
+            pass
         results: list[IngestResult] = []
-        for att in attachments[:MAX_ITEMS_PER_MESSAGE]:
-            result = await self.service.ingest_file(src, original_filename(att), await att.read(), context)
-            if result is not None:   # 밈·짤로 판단한 이미지는 보관하지 않는다
-                results.append(result)
-        for url in urls[: max(MAX_ITEMS_PER_MESSAGE - len(attachments), 0)]:
-            results.append(await self.service.ingest_link(src, url, context))
+        try:
+            results = await self._ingest_all(src, attachments, urls, context)
+        finally:
+            try:
+                await message.remove_reaction("⏳", self.user)
+            except (discord.HTTPException, AttributeError):
+                pass
         if not results:
             return 0
 
@@ -401,6 +407,19 @@ class ArchiveBot(discord.Client):
                     except discord.HTTPException:
                         log.warning("확인 메시지를 보내지 못했습니다: %s", message.jump_url)
         return len(new)
+
+    async def _ingest_all(self, src: Source, attachments: list, urls: list[str],
+                          context: list[str]) -> list[IngestResult]:
+        results: list[IngestResult] = []
+        for att in attachments[:MAX_ITEMS_PER_MESSAGE]:
+            started = time.monotonic()
+            result = await self.service.ingest_file(src, original_filename(att), await att.read(), context)
+            log.info("파일 처리 %.1f초: %s", time.monotonic() - started, original_filename(att))
+            if result is not None:   # 밈·짤로 판단한 이미지는 보관하지 않는다
+                results.append(result)
+        for url in urls[: max(MAX_ITEMS_PER_MESSAGE - len(attachments), 0)]:
+            results.append(await self.service.ingest_link(src, url, context))
+        return results
 
     async def _context(self, message: discord.Message) -> list[str]:
         lines = []

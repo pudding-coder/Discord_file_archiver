@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -242,6 +243,7 @@ class GeminiAnalyzer:
         self.client = genai.Client(api_key=api_key, http_options=types.HttpOptions(api_version="v1beta"))
         self.model = model
         self._model_checked = False
+        self._thinking_ok = True   # 생각 줄이기 설정을 모델이 거부하면 끈다
 
     async def _parse(self, system: str, contents: list, schema: type[BaseModel]):
         from google.genai import errors
@@ -265,19 +267,49 @@ class GeminiAnalyzer:
             raise RuntimeError(f"Gemini 응답을 읽지 못했습니다: {str(response.text or '')[:200]}")
         return parsed
 
-    async def _generate(self, system: str, contents: list, schema: type[BaseModel]):
+    def thinking_config(self):
+        """분류·검색은 오래 생각할 필요가 없다. 최신 Flash는 기본으로 생각부터 해서 수십 초 걸리기도 한다."""
         from google.genai import types
 
-        return await self.client.aio.models.generate_content(
-            model=self.model,
-            contents=contents,
-            config=types.GenerateContentConfig(
+        if not self._thinking_ok:
+            return None
+        m = re.search(r"gemini-(\d+)(?:\.(\d+))?", self.model)
+        if not m:
+            # gemini-flash-latest 같은 별칭: 최신 Flash 방식으로 시도하고, 거부되면 _generate가 기본 설정으로 되돌린다
+            return types.ThinkingConfig(thinking_level="low") if "flash" in self.model else None
+        major = int(m.group(1))
+        if major >= 3:
+            return types.ThinkingConfig(thinking_level="low")
+        if major == 2 and m.group(2) == "5" and "pro" not in self.model:
+            return types.ThinkingConfig(thinking_budget=0)
+        return None
+
+    async def _generate(self, system: str, contents: list, schema: type[BaseModel]):
+        from google.genai import errors, types
+
+        def config(thinking):
+            return types.GenerateContentConfig(
                 system_instruction=system,
                 response_mime_type="application/json",
                 response_schema=schema,
                 temperature=0.2,
-            ),
-        )
+                thinking_config=thinking,
+            )
+
+        started = time.monotonic()
+        thinking = self.thinking_config()
+        try:
+            response = await self.client.aio.models.generate_content(
+                model=self.model, contents=contents, config=config(thinking))
+        except errors.ClientError as e:
+            if thinking is None or getattr(e, "code", None) != 400 or "think" not in str(e).lower():
+                raise
+            log.info("모델 %s이(가) 생각 줄이기 설정을 받지 않아 기본 설정으로 다시 보냅니다", self.model)
+            self._thinking_ok = False
+            response = await self.client.aio.models.generate_content(
+                model=self.model, contents=contents, config=config(None))
+        log.info("Gemini 응답 %.1f초 (%s, %s)", time.monotonic() - started, self.model, schema.__name__)
+        return response
 
     async def find_available_model(self) -> str | None:
         names = []

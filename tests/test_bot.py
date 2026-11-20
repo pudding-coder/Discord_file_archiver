@@ -41,6 +41,9 @@ class FakeMessage:
     async def add_reaction(self, emoji):
         self.reactions.append(emoji)
 
+    async def remove_reaction(self, emoji, member):
+        self.reactions.remove(emoji)
+
     async def reply(self, content, **kwargs):
         self.replies.append((content, kwargs))
 
@@ -300,3 +303,18 @@ async def test_commands_register_per_server_and_on_join(config, service):
     await bot.on_guild_join(SimpleNamespace(id=2, name="새 서버"))
     assert not await bot.register_commands(SimpleNamespace(id=3, name="권한 없음"))   # 멈추지 않고 넘어감
     assert synced == [1, 2] and copied == [1, 2, 3]
+
+
+async def test_hourglass_shows_while_processing(config, service):
+    bot = ArchiveBot(config, service)
+    seen = []
+    original = service.ingest_file
+
+    async def watch(*args, **kwargs):
+        seen.append(list(msg.reactions))
+        return await original(*args, **kwargs)
+
+    service.ingest_file = watch
+    msg = FakeMessage("", [FakeAttachment("a.pdf", make_pdf("x"))])
+    await bot.on_message(msg)
+    assert seen == [["⏳"]] and msg.reactions == ["📌"]
