@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 import logging
 import time
 import re
@@ -91,6 +92,40 @@ def render_hit(index: int, hit: SearchHit, base_url: str) -> str:
     lines.append(f"> {hit.reason or doc['summary']}")
     lines.append(" · ".join(doc_links(doc, base_url)) or "링크 없음 (공유하면 사본 파일을 올려요)")
     return "\n".join(lines)
+
+
+KST = timezone(timedelta(hours=9))
+
+
+def local_date(iso: str) -> str:
+    """저장된 UTC 시각을 한국 날짜로 (예: 11/18)."""
+    try:
+        when = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return (iso or "")[5:10].replace("-", "/")
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    when = when.astimezone(KST)
+    return f"{when.month}/{when.day}"
+
+
+def render_duplicates(service: ArchiveService, docs: list[dict]) -> str:
+    lines = []
+    for doc in docs[:MAX_ITEMS_PER_MESSAGE]:
+        links = []
+        if doc.get("jump_url"):
+            links.append(f"[원문 메시지]({doc['jump_url']})")
+        if doc.get("drive_url"):
+            links.append(f"[드라이브]({doc['drive_url']})")
+        line = (f"♻️ 이미 {local_date(doc['created_at'])}에 {doc['author_name']}님이 올린 자료예요: "
+                f"**{doc['title']}**")
+        if links:
+            line += " → " + " · ".join(links)
+        if latest := service.newer_version(doc):
+            latest_link = f" → [원문 메시지]({latest['jump_url']})" if latest.get("jump_url") else ""
+            line += f"\n　최신본은 **v{latest['version_no']} {latest['title']}**예요{latest_link}"
+        lines.append(line)
+    return "\n".join(lines)[:2000]
 
 
 def doc_links(doc: dict, base_url: str) -> list[str]:
@@ -404,6 +439,13 @@ class ArchiveBot(discord.Client):
             await message.add_reaction("📌" if new else "♻️")
         except discord.HTTPException:
             pass
+        dups = [r.doc for r in results if r.duplicate and r.doc.get("message_id") != message.id]
+        if not quiet and dups:
+            try:   # 다시 올린 사람이 원본을 바로 찾을 수 있게 알려 준다
+                await message.reply(render_duplicates(self.service, dups), silent=True, mention_author=False,
+                                    suppress_embeds=True, delete_after=self.config.prompt_ttl or None)
+            except discord.HTTPException:
+                log.warning("중복 안내를 보내지 못했습니다: %s", message.jump_url)
         if not quiet:
             for r in new:
                 view = build_panel_view(r.doc, "p", self.config.topic_tags)

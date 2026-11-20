@@ -97,7 +97,7 @@ async def test_duplicate_gets_recycle_reaction_and_links_are_archived(config, se
     await bot.on_message(FakeMessage("", [FakeAttachment("a.pdf", pdf)], mid=1))
     again = FakeMessage("", [FakeAttachment("a.pdf", pdf)], mid=2)
     await bot.on_message(again)
-    assert again.reactions == ["♻️"] and again.replies == []
+    assert again.reactions == ["♻️"] and len(again.replies) == 1 and "이미" in again.replies[0][0]
     link = FakeMessage("참고 https://example.com/post", mid=3)
     await bot.on_message(link)
     assert link.reactions == ["📌"] and service.db.list_docs(1)[0]["kind"] == "link"
@@ -350,3 +350,43 @@ async def test_share_posts_the_file_itself(config, service, src):
     interaction.guild.filesize_limit = 10                    # 서버 한도보다 크면 링크만
     await ShareButton(doc["id"], 0).callback(interaction)
     assert posted[1][1] == [] and "파일이 커서" in posted[1][0]
+
+
+async def test_duplicate_upload_points_to_the_original(config, service):
+    from archivebot.bot import local_date, render_duplicates
+
+    bot = ArchiveBot(config, service)
+    pdf = make_pdf("same")
+    first = FakeMessage("", [FakeAttachment("IR자료.pdf", pdf)], mid=1)
+    first.created_at = datetime(2026, 11, 17, 16, 30, tzinfo=timezone.utc)   # 한국 시간 11/18 01:30
+    await bot.on_message(first)
+    original = service.db.list_docs(1)[0]
+    service.db.update_doc(original["id"], drive_url="https://drive.google.com/file/d/abc/view")
+
+    again = FakeMessage("이거 봐봐", [FakeAttachment("IR자료(1).pdf", pdf)], mid=2)
+    await bot.on_message(again)
+    assert again.reactions == ["♻️"]
+    content, kwargs = again.replies[0]
+    assert content.startswith("♻️ 이미 11/18에 민수님이 올린 자료예요: **IR자료**")
+    assert "[원문 메시지](https://discord.com/channels/1/10/1)" in content
+    assert "[드라이브](https://drive.google.com/file/d/abc/view)" in content
+    assert kwargs["silent"] and kwargs["delete_after"] == config.prompt_ttl and "view" not in kwargs
+    assert local_date("2026-11-17T16:30:00+00:00") == "11/18"
+
+
+async def test_duplicate_of_old_version_mentions_latest(config, service, src):
+    from archivebot.bot import render_duplicates
+
+    v1 = (await service.ingest_file(src, "IR_v1.pdf", make_pdf("first"), [])).doc
+    await service.ingest_file(src, "IR_v2.pdf", make_pdf("second"), [])
+    text = render_duplicates(service, [v1])
+    assert "최신본은 **v2 IR_v2**예요" in text
+
+
+async def test_backfill_does_not_post_duplicate_notes(config, service):
+    bot = ArchiveBot(config, service)
+    pdf = make_pdf("x")
+    await bot.on_message(FakeMessage("", [FakeAttachment("a.pdf", pdf)], mid=1))
+    old = FakeMessage("", [FakeAttachment("a.pdf", pdf)], mid=2)
+    await bot.archive_message(old, quiet=True)
+    assert old.replies == [] and old.reactions == ["♻️"]
