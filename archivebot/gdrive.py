@@ -153,9 +153,15 @@ class GoogleSync:
                 log.exception("드라이브 동기화 실패 (서버 %s) — 나중에 다시 시도합니다", guild_id)
 
     async def run_forever(self, interval: float = 600) -> None:
-        """올리지 못한 자료와 반영하지 못한 변경을 주기적으로 다시 시도한다."""
+        """올리지 못한 자료와 반영하지 못한 변경을 주기적으로 다시 시도한다.
+        봇이 켜질 때는 모든 서버를 한 번 맞춰 둔다 (이름 규칙이 바뀌었으면 예전 파일 이름도 고친다)."""
+        first = True
         while True:
-            for guild_id in sorted(set(self.db.guilds_without_drive()) | self._dirty):
+            targets = set(self.db.guilds_without_drive()) | self._dirty
+            if first:
+                targets |= set(self.db.guild_ids())
+                first = False
+            for guild_id in sorted(targets):
                 try:
                     await self.sync_guild(guild_id)
                 except Exception:

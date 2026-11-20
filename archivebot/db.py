@@ -173,6 +173,9 @@ class Database:
             "ORDER BY id", (guild_id,))
         return [_doc(r) for r in rows]
 
+    def guild_ids(self) -> list[int]:
+        return [r[0] for r in self.conn.execute("SELECT DISTINCT guild_id FROM documents")]
+
     def guilds_without_drive(self) -> list[int]:
         rows = self.conn.execute("SELECT DISTINCT guild_id FROM documents WHERE drive_file_id IS NULL")
         return [r[0] for r in rows]

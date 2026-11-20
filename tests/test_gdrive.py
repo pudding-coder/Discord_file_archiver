@@ -278,3 +278,23 @@ async def test_dropped_connection_is_logged_briefly_and_retried_later(service, s
     google.fail_upload = None
     await service.sync.sync_guild(1)
     assert service.db.get_doc(doc["id"])["drive_url"]
+
+
+async def test_startup_renames_old_style_files_without_any_change(service, src, google):
+    import asyncio
+
+    doc = (await service.ingest_file(src, "https___klipy.com_gifs_x.md", b"# gif", [])).doc
+    await service.sync.wait_idle()
+    file_id = service.db.get_doc(doc["id"])["drive_file_id"]
+    google.store[file_id]["name"] = "2026-08-12 https___klipy.com_gifs_x.md"     # 예전 형식으로 올라간 상태
+    service.db.update_doc(doc["id"], drive_name=None)
+    service.sync._dirty.clear()
+
+    task = asyncio.create_task(service.sync.run_forever(interval=3600))      # 봇이 켜짐
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        if service.db.get_doc(doc["id"])["drive_name"]:
+            break
+    task.cancel()
+    assert google.store[file_id]["name"] == service.db.get_doc(doc["id"])["drive_name"]
+    assert not google.store[file_id]["name"].startswith("2026-08-12 ")
