@@ -14,7 +14,8 @@ class Call:
     def __init__(self, fn):
         self.fn = fn
 
-    def execute(self):
+    def execute(self, num_retries=0):
+        assert num_retries > 0          # 연결 끊김에 대비해 항상 다시 시도하게 부른다
         return self.fn()
 
 
@@ -259,3 +260,21 @@ async def test_drive_name_follows_tag_and_title_changes(service, src, google):
     service.edit_doc(doc["id"], 9, "지현", title="또 바뀐 제목")
     await service.sync.wait_idle()
     assert service.db.get_doc(doc["id"])["drive_file_id"] == ""
+
+
+async def test_dropped_connection_is_logged_briefly_and_retried_later(service, src, google, caplog):
+    import logging
+    import ssl
+
+    from archivebot.gdrive import _is_transient
+
+    assert _is_transient(ssl.SSLError("UNEXPECTED_EOF_WHILE_READING"))
+    assert _is_transient(FakeHttpError(503)) and not _is_transient(FakeHttpError(404))
+    google.fail_upload = ssl.SSLError("[SSL: UNEXPECTED_EOF_WHILE_READING]")
+    with caplog.at_level(logging.WARNING, logger="archivebot.gdrive"):
+        doc = (await service.ingest_file(src, "a.pdf", make_pdf("x"), [])).doc
+        await service.sync.wait_idle()
+    assert "잠깐 끊겼습니다" in caplog.text and "Traceback" not in caplog.text
+    google.fail_upload = None
+    await service.sync.sync_guild(1)
+    assert service.db.get_doc(doc["id"])["drive_url"]

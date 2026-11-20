@@ -30,6 +30,8 @@ SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 SCOPES_USER = ["https://www.googleapis.com/auth/drive.file"]
 SCOPES_SERVICE_ACCOUNT = ["https://www.googleapis.com/auth/drive"]
 RESUMABLE_OVER = 5 * 1024 * 1024
+# 연결 끊김(SSL EOF 등)·5xx는 새 연결로 다시 시도한다. 오래 쉬던 연결을 구글이 닫아 두는 경우가 흔하다.
+RETRIES = 3
 SHEET_TITLE = "팀 자료 목록"
 
 
@@ -75,6 +77,16 @@ def drive_file_name(doc: dict) -> str:
     filename = doc.get("filename") or ""
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ("md" if doc.get("kind") == "link" else "")
     return f"{name}.{ext}" if ext else name
+
+
+def _is_transient(error: Exception) -> bool:
+    """네트워크가 잠깐 끊긴 오류인가 (다음 동기화 때 저절로 풀린다)."""
+    import socket
+    import ssl
+
+    status = _status(error)
+    return isinstance(error, (ssl.SSLError, ConnectionError, TimeoutError, socket.timeout)) or \
+        (status is not None and status >= 500)
 
 
 def _status(error: Exception) -> int | None:
@@ -134,8 +146,11 @@ class GoogleSync:
             await asyncio.shield(task)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            log.exception("드라이브 동기화 실패 (서버 %s) — 나중에 다시 시도합니다", guild_id)
+        except Exception as e:
+            if _is_transient(e):
+                log.warning("드라이브 연결이 잠깐 끊겼습니다 (서버 %s): %s — 나중에 다시 시도합니다", guild_id, e)
+            else:
+                log.exception("드라이브 동기화 실패 (서버 %s) — 나중에 다시 시도합니다", guild_id)
 
     async def run_forever(self, interval: float = 600) -> None:
         """올리지 못한 자료와 반영하지 못한 변경을 주기적으로 다시 시도한다."""
@@ -243,7 +258,7 @@ class GoogleSync:
         body: dict = {"name": name, "mimeType": FOLDER_MIME}
         if parent:
             body["parents"] = [parent]
-        return self.drive.files().create(body=body, fields="id", supportsAllDrives=True).execute()["id"]
+        return self.drive.files().create(body=body, fields="id", supportsAllDrives=True).execute(num_retries=RETRIES)["id"]
 
     def _upload(self, folder: str, name: str, path: Path) -> tuple[str, str]:
         from googleapiclient.http import MediaFileUpload
@@ -253,32 +268,32 @@ class GoogleSync:
         created = self.drive.files().create(
             body={"name": name, "parents": [folder]}, media_body=media,
             fields="id,webViewLink", supportsAllDrives=True,
-        ).execute()
+        ).execute(num_retries=RETRIES)
         file_id = created["id"]
         return file_id, created.get("webViewLink") or f"https://drive.google.com/file/d/{file_id}/view"
 
     def _rename(self, file_id: str, name: str) -> None:
         self.drive.files().update(fileId=file_id, body={"name": name}, fields="id",
-                                  supportsAllDrives=True).execute()
+                                  supportsAllDrives=True).execute(num_retries=RETRIES)
 
     def _create_sheet(self, folder: str) -> str:
         created = self.drive.files().create(
             body={"name": SHEET_TITLE, "mimeType": SHEET_MIME, "parents": [folder]},
             fields="id", supportsAllDrives=True,
-        ).execute()
+        ).execute(num_retries=RETRIES)
         sheet_id = created["id"]
         try:   # 머리글 고정 (실패해도 목록은 쓸 수 있다)
             self.sheets.spreadsheets().batchUpdate(spreadsheetId=sheet_id, body={"requests": [{
                 "updateSheetProperties": {
                     "properties": {"sheetId": 0, "gridProperties": {"frozenRowCount": 1}},
                     "fields": "gridProperties.frozenRowCount",
-                }}]}).execute()
+                }}]}).execute(num_retries=RETRIES)
         except Exception:
             log.warning("시트 머리글을 고정하지 못했습니다", exc_info=True)
         return sheet_id
 
     def _write_rows(self, sheet_id: str, rows: list[list]) -> None:
         values = self.sheets.spreadsheets().values()
-        values.clear(spreadsheetId=sheet_id, range="A:Z", body={}).execute()
+        values.clear(spreadsheetId=sheet_id, range="A:Z", body={}).execute(num_retries=RETRIES)
         # RAW: 제목이 "="로 시작해도 수식으로 실행되지 않게
-        values.update(spreadsheetId=sheet_id, range="A1", valueInputOption="RAW", body={"values": rows}).execute()
+        values.update(spreadsheetId=sheet_id, range="A1", valueInputOption="RAW", body={"values": rows}).execute(num_retries=RETRIES)
