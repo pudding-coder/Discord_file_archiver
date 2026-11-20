@@ -95,7 +95,7 @@ async def test_ingest_uploads_copy_and_writes_sheet(service, src, google):
     folder = service.db.get_setting(1, "drive_folder_id")
     uploaded = google.store[doc["drive_file_id"]]
     assert uploaded["parents"] == [folder]
-    assert uploaded["name"] == f"[{doc['tags'][0]}] IR자료_{doc['created_at'][:10]}.pdf"
+    assert uploaded["name"] == f"IR자료_{doc['created_at'][:10]}_[{doc['tags'][0]}].pdf"
     assert doc["drive_name"] == uploaded["name"]
     assert google.store[folder]["name"] == "팀 자료 아카이브 - 8조"
 
@@ -244,8 +244,8 @@ async def test_drive_name_follows_tag_and_title_changes(service, src, google):
     service.edit_doc(doc["id"], 9, "지현", title="경쟁사 요금 분석")
     await service.sync.wait_idle()
     date = doc["created_at"][:10]
-    assert google.store[file_id]["name"] == f"[리서치] 경쟁사 요금 분석_{date}.pdf"
-    assert service.db.get_doc(doc["id"])["drive_name"] == f"[리서치] 경쟁사 요금 분석_{date}.pdf"
+    assert google.store[file_id]["name"] == f"경쟁사 요금 분석_{date}_[리서치].pdf"
+    assert service.db.get_doc(doc["id"])["drive_name"] == f"경쟁사 요금 분석_{date}_[리서치].pdf"
     renames = [c for c in google.calls if c.startswith("rename:")]
     await service.sync.sync_guild(1)                       # 바뀐 게 없으면 다시 이름을 바꾸지 않는다
     assert [c for c in google.calls if c.startswith("rename:")] == renames

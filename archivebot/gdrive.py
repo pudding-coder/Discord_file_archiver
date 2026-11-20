@@ -64,15 +64,15 @@ def sheet_url(sheet_id: str) -> str:
 
 
 def drive_file_name(doc: dict) -> str:
-    """드라이브 파일 이름: [첫 태그] AI 제목 (v2)_날짜.확장자  예) [리서치] 경쟁사 요금 분석_2026-11-20.pdf"""
+    """드라이브 파일 이름: AI 제목 (v2)_날짜_[첫 태그].확장자  예) 경쟁사 요금 분석_2026-11-20_[리서치].pdf"""
     tag = (doc.get("tags") or [""])[0].strip()
     title = (doc.get("title") or doc.get("filename") or "자료").strip()
     if tag and title.startswith(f"[{tag}]"):
         title = title[len(tag) + 2:].strip()      # 팀 규칙으로 제목에 이미 태그가 붙어 있으면 한 번만
-    prefix = f"[{tag}] " if tag else ""
     version_no = doc.get("version_no") or 1
     version = f" v{version_no}" if version_no > 1 and f"v{version_no}" not in title.lower() else ""
-    name = f"{prefix}{title}{version}_{(doc.get('created_at') or '')[:10]}".strip("_ ")
+    parts = [f"{title}{version}", (doc.get("created_at") or "")[:10], f"[{tag}]" if tag else ""]
+    name = "_".join(p for p in parts if p)
     name = re.sub(r"[\\/\x00-\x1f]", "·", name)[:150]
     filename = doc.get("filename") or ""
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ("md" if doc.get("kind") == "link" else "")
