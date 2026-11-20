@@ -13,6 +13,9 @@ from .service import ArchiveService
 def main() -> None:
     load_dotenv()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # 외부 라이브러리가 요청마다 남기는 안내 문구는 숨긴다 (경고·오류는 그대로 보인다)
+    for noisy in ("google_genai", "httpx", "googleapiclient.discovery_cache"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     log = logging.getLogger("archivebot")
     config = Config.from_env()
     if not config.discord_token:
