@@ -485,6 +485,21 @@ class ArchiveBot(discord.Client):
         return lines
 
 
+async def backfill_channel(bot: "ArchiveBot", channel, limit: int) -> int:
+    """채널의 최근 메시지 limit개를 오래된 것부터 차례로 보관한다 (그래야 v1 → v2 순서로 버전이 이어진다).
+    history(oldest_first=True)는 채널 맨 처음부터 가져오므로, 최신순으로 받아 뒤집는다."""
+    messages = [m async for m in channel.history(limit=limit)]
+    count = 0
+    for message in reversed(messages):
+        if message.author.bot:
+            continue
+        try:
+            count += await bot.archive_message(message, quiet=True)
+        except Exception:
+            log.exception("과거 메시지 처리 실패: %s", message.jump_url)
+    return count
+
+
 # ── 슬래시 명령 ──────────────────────────────────────────
 def register_commands(bot: ArchiveBot) -> None:
     tree, service = bot.tree, bot.service
@@ -598,14 +613,7 @@ def register_commands(bot: ArchiveBot) -> None:
         if not service.db.collect_enabled(interaction.guild_id, interaction.channel_id):
             return await interaction.response.send_message("이 채널은 수집이 꺼져 있어요. `/수집 켜기` 후 다시 해 주세요.", ephemeral=True)
         await interaction.response.defer(ephemeral=True, thinking=True)
-        count = 0
-        async for message in interaction.channel.history(limit=limit, oldest_first=True):  # type: ignore[union-attr]
-            if message.author.bot:
-                continue
-            try:
-                count += await bot.archive_message(message, quiet=True)
-            except Exception:
-                log.exception("과거 메시지 처리 실패: %s", message.jump_url)
+        count = await backfill_channel(bot, interaction.channel, limit)
         await interaction.followup.send(f"최근 메시지 {limit}개를 훑어 자료 {count}건을 새로 보관했어요.", ephemeral=True)
 
     @tree.command(name="드라이브", description="자료가 쌓이는 구글 드라이브 폴더와 목록 시트 링크를 봐요.")

@@ -390,3 +390,25 @@ async def test_backfill_does_not_post_duplicate_notes(config, service):
     old = FakeMessage("", [FakeAttachment("a.pdf", pdf)], mid=2)
     await bot.archive_message(old, quiet=True)
     assert old.replies == [] and old.reactions == ["♻️"]
+
+
+async def test_backfill_takes_recent_messages_oldest_first(config, service):
+    from archivebot.bot import backfill_channel
+
+    msgs = [FakeMessage("", [FakeAttachment(f"IR_v{i}.pdf", make_pdf(f"draft {i}"))], mid=i) for i in range(1, 6)]
+
+    class Channel:
+        id = 10
+
+        def history(self, limit, **kwargs):
+            assert not kwargs.get("oldest_first")       # 맨 처음부터가 아니라 최근 것을 가져와야 한다
+            async def gen():
+                for m in reversed(msgs[-limit:]):          # 디스코드는 최신순으로 준다
+                    yield m
+            return gen()
+
+    bot = ArchiveBot(config, service)
+    assert await backfill_channel(bot, Channel(), 3) == 3
+    docs = sorted(service.db.list_docs(1), key=lambda d: d["id"])
+    assert [d["filename"] for d in docs] == ["IR_v3.pdf", "IR_v4.pdf", "IR_v5.pdf"]   # 최근 3개, 오래된 것부터
+    assert [d["version_no"] for d in docs] == [1, 2, 3]
