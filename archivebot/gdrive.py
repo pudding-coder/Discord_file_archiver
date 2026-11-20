@@ -178,19 +178,30 @@ class GoogleSync:
         """올리지 않은 자료를 올리고 시트를 다시 쓴다. 새로 올린 자료 수를 돌려준다."""
         async with self._lock:
             self._dirty.discard(guild_id)
+            failures: list[Exception] = []
             try:
                 folder = await self._folder(guild_id)
-                uploaded = await self._upload_pending(guild_id, folder)
-                await self._rename_changed(guild_id)
-                if uploaded:
+                # 단계마다 따로 돈다: 파일 하나가 계속 실패해도 이름 정리·시트 갱신은 된다
+                uploaded = await self._upload_pending(guild_id, folder, failures)
+                renamed = await self._rename_changed(guild_id, failures)
+                if uploaded or renamed:
                     self.service.refresh_index(guild_id, schedule_sync=False)   # 로컬 색인에도 드라이브 링크
-                await self._write_sheet(guild_id, folder)
-                return uploaded
+                try:
+                    await self._write_sheet(guild_id, folder)
+                except Exception as e:
+                    failures.append(e)
             except Exception:
                 self._dirty.add(guild_id)
                 raise
+            if uploaded or renamed or failures:
+                log.info("드라이브 동기화 (서버 %s): 업로드 %d · 이름 변경 %d · 실패 %d",
+                         guild_id, uploaded, renamed, len(failures))
+            if failures:
+                self._dirty.add(guild_id)   # 다음 주기에 다시 시도
+                raise failures[0]
+            return uploaded
 
-    async def _upload_pending(self, guild_id: int, folder: str) -> int:
+    async def _upload_pending(self, guild_id: int, folder: str, failures: list[Exception] | None = None) -> int:
         uploaded = 0
         for doc in self.db.docs_without_drive(guild_id):
             path = self.service.archive_file(doc)
@@ -205,12 +216,17 @@ class GoogleSync:
                     # 누군가 폴더를 지웠다: 다음 동기화 때 폴더와 시트를 새로 만든다
                     self.db.set_setting(guild_id, "drive_folder_id", None)
                     self.db.set_setting(guild_id, "drive_sheet_id", None)
-                raise
+                    raise
+                if failures is None:
+                    raise
+                log.warning("드라이브 업로드 실패 (자료 #%s %s): %s", doc["id"], name, e)
+                failures.append(e)
+                continue
             self.db.update_doc(doc["id"], drive_file_id=file_id, drive_url=url, drive_name=name)
             uploaded += 1
         return uploaded
 
-    async def _rename_changed(self, guild_id: int) -> int:
+    async def _rename_changed(self, guild_id: int, failures: list[Exception] | None = None) -> int:
         """태그·제목·버전이 바뀐 자료는 드라이브 파일 이름도 맞춘다 (예전 형식으로 올라간 파일 포함)."""
         renamed = 0
         for doc in self.db.docs_on_drive(guild_id):
@@ -224,7 +240,11 @@ class GoogleSync:
                     # 드라이브에서 누군가 지운 파일: 다시 올리지도, 이름을 고치지도 않는다
                     self.db.update_doc(doc["id"], drive_file_id="", drive_name=None)
                     continue
-                raise
+                if failures is None:
+                    raise
+                log.warning("드라이브 이름 변경 실패 (자료 #%s → %s): %s", doc["id"], name, e)
+                failures.append(e)
+                continue
             self.db.update_doc(doc["id"], drive_name=name)
             renamed += 1
         return renamed

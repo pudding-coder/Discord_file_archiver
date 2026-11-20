@@ -298,3 +298,24 @@ async def test_startup_renames_old_style_files_without_any_change(service, src, 
     task.cancel()
     assert google.store[file_id]["name"] == service.db.get_doc(doc["id"])["drive_name"]
     assert not google.store[file_id]["name"].startswith("2026-08-12 ")
+
+
+async def test_one_failing_upload_does_not_block_renames_or_sheet(service, src, google, caplog):
+    import logging
+
+    ok = (await service.ingest_file(src, "ok.pdf", make_pdf("ok"), [])).doc
+    await service.sync.wait_idle()
+    file_id = service.db.get_doc(ok["id"])["drive_file_id"]
+    service.db.update_doc(ok["id"], drive_name="2026-08-27 ok.pdf")       # 예전 이름 상태
+    google.store[file_id]["name"] = "2026-08-27 ok.pdf"
+
+    google.fail_upload = RuntimeError("quota or network")                  # 새 파일 업로드는 계속 실패
+    bad = (await service.ingest_file(src, "bad.pdf", make_pdf("bad"), [])).doc
+    with caplog.at_level(logging.INFO, logger="archivebot.gdrive"):
+        await service.sync.wait_idle()
+    assert service.db.get_doc(bad["id"])["drive_file_id"] is None          # 실패한 건 남아서 다시 시도
+    assert google.store[file_id]["name"] == service.db.get_doc(ok["id"])["drive_name"] != "2026-08-27 ok.pdf"
+    sheet = service.db.get_setting(1, "drive_sheet_id")
+    assert len(google.sheet_values[sheet]) == 3                            # 시트도 갱신됨
+    assert "업로드 0 · 이름 변경 1 · 실패 1" in caplog.text
+    assert 1 in service.sync._dirty
