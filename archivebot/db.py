@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS documents (
     reuse_count INTEGER NOT NULL DEFAULT 0,
     drive_file_id TEXT,                          -- 구글 드라이브에 올린 사본
     drive_url TEXT,
+    drive_name TEXT,                             -- 드라이브에 붙인 파일 이름 (바뀌면 이름을 고친다)
     created_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_doc_sha ON documents(guild_id, sha256);
@@ -106,7 +107,7 @@ class Database:
     def _migrate(self) -> None:
         """이전 버전에서 만든 DB에 새 칸을 더한다."""
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(documents)")}
-        for name in ("drive_file_id", "drive_url"):
+        for name in ("drive_file_id", "drive_url", "drive_name"):
             if name not in cols:
                 self.conn.execute(f"ALTER TABLE documents ADD COLUMN {name} TEXT")
         if "pending_tags" not in cols:
@@ -164,6 +165,12 @@ class Database:
     def docs_without_drive(self, guild_id: int) -> list[dict]:
         rows = self.conn.execute(
             "SELECT * FROM documents WHERE guild_id = ? AND drive_file_id IS NULL ORDER BY id", (guild_id,))
+        return [_doc(r) for r in rows]
+
+    def docs_on_drive(self, guild_id: int) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM documents WHERE guild_id = ? AND drive_file_id IS NOT NULL AND drive_file_id != '' "
+            "ORDER BY id", (guild_id,))
         return [_doc(r) for r in rows]
 
     def guilds_without_drive(self) -> list[int]:

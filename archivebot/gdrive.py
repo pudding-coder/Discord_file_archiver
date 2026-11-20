@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import mimetypes
+import re
 from pathlib import Path
 from typing import Callable
 
@@ -58,6 +59,22 @@ def folder_url(folder_id: str) -> str:
 
 def sheet_url(sheet_id: str) -> str:
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit"
+
+
+def drive_file_name(doc: dict) -> str:
+    """드라이브 파일 이름: [첫 태그] AI 제목 (v2)_날짜.확장자  예) [리서치] 경쟁사 요금 분석_2026-11-20.pdf"""
+    tag = (doc.get("tags") or [""])[0].strip()
+    title = (doc.get("title") or doc.get("filename") or "자료").strip()
+    if tag and title.startswith(f"[{tag}]"):
+        title = title[len(tag) + 2:].strip()      # 팀 규칙으로 제목에 이미 태그가 붙어 있으면 한 번만
+    prefix = f"[{tag}] " if tag else ""
+    version_no = doc.get("version_no") or 1
+    version = f" v{version_no}" if version_no > 1 and f"v{version_no}" not in title.lower() else ""
+    name = f"{prefix}{title}{version}_{(doc.get('created_at') or '')[:10]}".strip("_ ")
+    name = re.sub(r"[\\/\x00-\x1f]", "·", name)[:150]
+    filename = doc.get("filename") or ""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ("md" if doc.get("kind") == "link" else "")
+    return f"{name}.{ext}" if ext else name
 
 
 def _status(error: Exception) -> int | None:
@@ -143,6 +160,7 @@ class GoogleSync:
             try:
                 folder = await self._folder(guild_id)
                 uploaded = await self._upload_pending(guild_id, folder)
+                await self._rename_changed(guild_id)
                 if uploaded:
                     self.service.refresh_index(guild_id, schedule_sync=False)   # 로컬 색인에도 드라이브 링크
                 await self._write_sheet(guild_id, folder)
@@ -158,7 +176,7 @@ class GoogleSync:
             if path is None:
                 self.db.update_doc(doc["id"], drive_file_id="")   # 사본이 사라진 자료는 다시 시도하지 않는다
                 continue
-            name = f"{doc['created_at'][:10]} {doc['filename'] or path.name.split('_', 1)[-1]}"
+            name = drive_file_name(doc)
             try:
                 file_id, url = await asyncio.to_thread(self._upload, folder, name, path)
             except Exception as e:
@@ -167,9 +185,28 @@ class GoogleSync:
                     self.db.set_setting(guild_id, "drive_folder_id", None)
                     self.db.set_setting(guild_id, "drive_sheet_id", None)
                 raise
-            self.db.update_doc(doc["id"], drive_file_id=file_id, drive_url=url)
+            self.db.update_doc(doc["id"], drive_file_id=file_id, drive_url=url, drive_name=name)
             uploaded += 1
         return uploaded
+
+    async def _rename_changed(self, guild_id: int) -> int:
+        """태그·제목·버전이 바뀐 자료는 드라이브 파일 이름도 맞춘다 (예전 형식으로 올라간 파일 포함)."""
+        renamed = 0
+        for doc in self.db.docs_on_drive(guild_id):
+            name = drive_file_name(doc)
+            if name == doc.get("drive_name"):
+                continue
+            try:
+                await asyncio.to_thread(self._rename, doc["drive_file_id"], name)
+            except Exception as e:
+                if _status(e) == 404:
+                    # 드라이브에서 누군가 지운 파일: 다시 올리지도, 이름을 고치지도 않는다
+                    self.db.update_doc(doc["id"], drive_file_id="", drive_name=None)
+                    continue
+                raise
+            self.db.update_doc(doc["id"], drive_name=name)
+            renamed += 1
+        return renamed
 
     async def _write_sheet(self, guild_id: int, folder: str) -> None:
         sheet = self.db.get_setting(guild_id, "drive_sheet_id")
@@ -219,6 +256,10 @@ class GoogleSync:
         ).execute()
         file_id = created["id"]
         return file_id, created.get("webViewLink") or f"https://drive.google.com/file/d/{file_id}/view"
+
+    def _rename(self, file_id: str, name: str) -> None:
+        self.drive.files().update(fileId=file_id, body={"name": name}, fields="id",
+                                  supportsAllDrives=True).execute()
 
     def _create_sheet(self, folder: str) -> str:
         created = self.drive.files().create(

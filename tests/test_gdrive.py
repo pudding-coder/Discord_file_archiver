@@ -64,7 +64,15 @@ class FakeGoogle:
     def clear(self, spreadsheetId, range, body):
         return Call(lambda: self.sheet_values.__setitem__(spreadsheetId, []))
 
-    def update(self, spreadsheetId, range, valueInputOption, body):
+    def update(self, body, spreadsheetId=None, range=None, valueInputOption=None, fileId=None, fields=None,
+               supportsAllDrives=None):
+        if fileId is not None:                       # drive.files().update: 이름 바꾸기
+            def rename():
+                if fileId not in self.store:
+                    raise FakeHttpError(404)
+                self.store[fileId]["name"] = body["name"]
+                self.calls.append(f"rename:{body['name']}")
+            return Call(rename)
         assert valueInputOption == "RAW"
         return Call(lambda: self.sheet_values.__setitem__(spreadsheetId, body["values"]))
 
@@ -85,7 +93,9 @@ async def test_ingest_uploads_copy_and_writes_sheet(service, src, google):
     assert doc["drive_url"].startswith("https://drive.google.com/file/d/")
     folder = service.db.get_setting(1, "drive_folder_id")
     uploaded = google.store[doc["drive_file_id"]]
-    assert uploaded["parents"] == [folder] and uploaded["name"].endswith(" IR자료.pdf")
+    assert uploaded["parents"] == [folder]
+    assert uploaded["name"] == f"[{doc['tags'][0]}] IR자료_{doc['created_at'][:10]}.pdf"
+    assert doc["drive_name"] == uploaded["name"]
     assert google.store[folder]["name"] == "팀 자료 아카이브 - 8조"
 
     sheet = service.db.get_setting(1, "drive_sheet_id")
@@ -207,6 +217,7 @@ def test_real_google_client_builds_valid_requests(tmp_path):
         (ok, json.dumps({"id": "file1", "webViewLink": "https://drive.google.com/file/d/file1/view"})),
         (ok, json.dumps({"id": "sheet1"})),
         (ok, "{}"),   # 머리글 고정
+        (ok, json.dumps({"id": "file1"})),   # 이름 바꾸기
         (ok, "{}"),   # clear
         (ok, "{}"),   # update
     ])
@@ -218,4 +229,33 @@ def test_real_google_client_builds_valid_requests(tmp_path):
     path.write_bytes(make_pdf("x"))
     assert sync._upload("folder1", "2026-11-19 a.pdf", path) == ("file1", "https://drive.google.com/file/d/file1/view")
     assert sync._create_sheet("folder1") == "sheet1"
+    sync._rename("file1", "[리서치] 새 이름_2026-11-20.pdf")
     sync._write_rows("sheet1", [["id", "제목"], [1, "=1+1"]])
+
+
+async def test_drive_name_follows_tag_and_title_changes(service, src, google):
+    from archivebot.gdrive import drive_file_name
+
+    doc = (await service.ingest_file(src, "scan_0001.pdf", make_pdf("x"), [])).doc
+    await service.sync.wait_idle()
+    file_id = service.db.get_doc(doc["id"])["drive_file_id"]
+    service.set_tags(doc["id"], ["리서치"], 9, "지현")
+    service.edit_doc(doc["id"], 9, "지현", title="경쟁사 요금 분석")
+    await service.sync.wait_idle()
+    date = doc["created_at"][:10]
+    assert google.store[file_id]["name"] == f"[리서치] 경쟁사 요금 분석_{date}.pdf"
+    assert service.db.get_doc(doc["id"])["drive_name"] == f"[리서치] 경쟁사 요금 분석_{date}.pdf"
+    renames = [c for c in google.calls if c.startswith("rename:")]
+    await service.sync.sync_guild(1)                       # 바뀐 게 없으면 다시 이름을 바꾸지 않는다
+    assert [c for c in google.calls if c.startswith("rename:")] == renames
+
+    # 예전 형식으로 올라간 파일도 새 형식으로 바뀐다
+    service.db.update_doc(doc["id"], drive_name="2026-11-19 scan_0001.pdf")
+    await service.sync.sync_guild(1)
+    assert service.db.get_doc(doc["id"])["drive_name"] == drive_file_name(service.db.get_doc(doc["id"]))
+
+    # 드라이브에서 지워진 파일은 더 손대지 않는다
+    del google.store[file_id]
+    service.edit_doc(doc["id"], 9, "지현", title="또 바뀐 제목")
+    await service.sync.wait_idle()
+    assert service.db.get_doc(doc["id"])["drive_file_id"] == ""
