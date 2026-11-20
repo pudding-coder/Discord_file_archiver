@@ -412,3 +412,13 @@ async def test_backfill_takes_recent_messages_oldest_first(config, service):
     docs = sorted(service.db.list_docs(1), key=lambda d: d["id"])
     assert [d["filename"] for d in docs] == ["IR_v3.pdf", "IR_v4.pdf", "IR_v5.pdf"]   # 최근 3개, 오래된 것부터
     assert [d["version_no"] for d in docs] == [1, 2, 3]
+
+
+async def test_meme_link_gets_no_reaction(config, service):
+    from tests.test_service import ScriptedAnalyzer
+
+    service.analyzer = ScriptedAnalyzer(is_material=False)
+    bot = ArchiveBot(config, service)
+    msg = FakeMessage("ㅋㅋ https://klipy.com/gifs/x")
+    await bot.on_message(msg)
+    assert msg.reactions == [] and msg.replies == [] and service.db.list_docs(1) == []

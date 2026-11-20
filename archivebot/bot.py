@@ -467,7 +467,9 @@ class ArchiveBot(discord.Client):
             if result is not None:   # 밈·짤로 판단한 이미지는 보관하지 않는다
                 results.append(result)
         for url in urls[: max(MAX_ITEMS_PER_MESSAGE - len(attachments), 0)]:
-            results.append(await self.service.ingest_link(src, url, context))
+            result = await self.service.ingest_link(src, url, context)
+            if result is not None:   # 밈·GIF·잡담 링크는 보관하지 않는다
+                results.append(result)
         return results
 
     async def _context(self, message: discord.Message) -> list[str]:

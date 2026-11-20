@@ -226,3 +226,21 @@ async def test_images_are_skipped_without_vision_or_when_ai_fails(service, src):
     assert await service.ingest_file(src, "photo.png", make_png(), []) is None
     assert await service.ingest_file(src, "broken.png", b"not an image", []) is None
     assert service.db.list_docs(1) == []
+
+
+async def test_meme_links_are_not_archived_but_work_links_are(service, src):
+    ai = ScriptedAnalyzer(is_material=False)
+    service.analyzer = ai
+    assert await service.ingest_link(src, "https://klipy.com/gifs/reaction-x", ["민수: ㅋㅋㅋ"]) is None
+    assert service.db.list_docs(1) == []
+    assert "원문 주소: https://klipy.com/gifs/reaction-x" in ai.inputs[0].text   # AI가 주소도 본다
+
+    service.analyzer = ScriptedAnalyzer(is_material=True)
+    doc = (await service.ingest_link(src, "https://example.com/report", ["민수: 참고해"])).doc
+    assert doc["kind"] == "link" and doc["url"] == "https://example.com/report"
+
+
+def test_prompt_tells_ai_to_judge_links():
+    from archivebot.llm import SYSTEM
+
+    assert "링크도 내용을 보고 판단하세요" in SYSTEM and "GIF" in SYSTEM

@@ -91,7 +91,8 @@ class ArchiveService:
             return await self._store(src, "file", filename, None, sha, text, data, context,
                                      attachment=attachment, is_image=is_image)
 
-    async def ingest_link(self, src: Source, url: str, context: list[str]) -> IngestResult:
+    async def ingest_link(self, src: Source, url: str, context: list[str]) -> IngestResult | None:
+        """링크를 보관한다. AI가 밈·잡담 링크로 판단하면 None."""
         sha = hashlib.sha256(url.encode()).hexdigest()
         async with self._lock(src.guild_id):
             if dup := self._duplicate(src, sha):
@@ -99,7 +100,8 @@ class ArchiveService:
             content: LinkContent = await self.fetch_link(url)
             name = content.title or url
             body = f"# {name}\n\n원문: {url}\n\n{content.text}".encode()
-            return await self._store(src, "link", name, url, sha, content.text, body, context)
+            text = f"원문 주소: {url}\n{content.text}"   # 주소도 판단 근거 (예: …/gifs/…)
+            return await self._store(src, "link", name, url, sha, text, body, context)
 
     def _lock(self, guild_id: int) -> asyncio.Lock:
         # 같은 서버의 자료는 차례로 처리한다 (동시에 올린 v1·v2가 서로를 못 보는 일을 막는다)
@@ -132,7 +134,8 @@ class ArchiveService:
             if is_image:
                 return None   # 읽어 보지 못한 이미지는 자료인지 알 수 없어 보관하지 않는다
             analysis = await self.fallback.analyze(item)
-        if is_image and not analysis.is_material:
+        if (is_image or kind == "link") and not analysis.is_material:
+            log.info("자료가 아니라고 보고 보관하지 않았습니다: %s", url or name)
             return None
         if attachment and analysis.text_excerpt.strip():
             text = analysis.text_excerpt.strip()   # AI가 읽은 글자를 검색용 본문으로 쓴다
