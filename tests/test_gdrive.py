@@ -319,3 +319,11 @@ async def test_one_failing_upload_does_not_block_renames_or_sheet(service, src, 
     assert len(google.sheet_values[sheet]) == 3                            # 시트도 갱신됨
     assert "업로드 0 · 이름 변경 1 · 실패 1" in caplog.text
     assert 1 in service.sync._dirty
+
+
+async def test_sheet_shows_drive_file_name(service, src, google):
+    doc = (await service.ingest_file(src, "회의20260925.txt", "회의 내용".encode(), [])).doc
+    await service.sync.wait_idle()
+    rows = google.sheet_values[service.db.get_setting(1, "drive_sheet_id")]
+    col = rows[0].index("드라이브 파일명")
+    assert rows[1][col] == service.db.get_doc(doc["id"])["drive_name"] and rows[1][col].endswith(".txt")

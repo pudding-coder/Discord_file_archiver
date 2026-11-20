@@ -310,7 +310,7 @@ class ArchiveService:
 
     # ── AI 연결용 색인·내보내기 ───────────────────────────
     EXPORT_HEADER = ["id", "날짜", "제목", "공유 의도", "의도 출처", "태그", "버전", "버전 표기", "바뀐 점",
-                     "요약", "올린이", "출처", "종류", "파일명", "링크", "원문 메시지", "드라이브", "사본 경로",
+                     "요약", "올린이", "출처", "종류", "파일명", "링크", "원문 메시지", "드라이브", "드라이브 파일명", "사본 경로",
                      "재사용 횟수"]
 
     def export_rows(self, guild_id: int) -> list[list]:
@@ -321,7 +321,7 @@ class ArchiveService:
                 "사람" if d["intent_source"] == "user" else "AI", ", ".join(d["tags"]),
                 f"v{d['version_no']}", d["version_label"] or "", d["change_note"] or "", d["summary"],
                 d["author_name"], d["source"], d["kind"], d["filename"] or "", d["url"] or "",
-                d["jump_url"] or "", d.get("drive_url") or "", d["archive_path"] or "", d["reuse_count"],
+                d["jump_url"] or "", d.get("drive_url") or "", d.get("drive_name") or "", d["archive_path"] or "", d["reuse_count"],
             ])
         return rows
 
