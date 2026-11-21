@@ -47,8 +47,24 @@ def one_line(doc: dict) -> str:
     return " · ".join(bits)
 
 
+MEASURE_WINDOW = 15 * 60      # /측정 시작 후 이 시간(초) 안에 공유해야 측정으로 친다
+PROCESS_CAP = 600             # 이보다 오래 걸렸으면 봇이 꺼져 있던 것: 처리 시간으로 기록하지 않음
+
+
+def fmt_seconds(sec: float | None) -> str:
+    if sec is None:
+        return "–"
+    if sec < 10:
+        return f"{sec:.1f}초"
+    if sec < 60:
+        return f"{sec:.0f}초"
+    return f"{int(sec // 60)}분 {int(sec % 60)}초"
+
+
 def render_prompt(service: ArchiveService, doc: dict) -> str:
-    lines = [f"📌 {one_line(doc)} 저장했어요."]
+    took = f" (정리 {fmt_seconds(doc['process_seconds'])})" \
+        if service.config.show_timings and doc.get("process_seconds") is not None else ""
+    lines = [f"📌 {one_line(doc)} 저장했어요.{took}"]
     if doc["pending_intent"]:
         label = INTENTS[doc["intent"]][0]
         lines.append(f"왜 올린 자료인지 헷갈려요. 일단 **{label}**로 뒀는데, 다르면 눌러 주세요.")
@@ -71,7 +87,9 @@ def render_info(service: ArchiveService, doc: dict) -> str:
         f"📌 {one_line(doc)}  `#{doc['id']}`",
         f"> {doc['summary']}",
         f"태그: {', '.join(doc['tags']) or '없음'} · 올린이: {doc['author_name']} · {doc['created_at'][:10]} "
-        f"· 의도 지정: {'사람' if doc['intent_source'] == 'user' else 'AI'}",
+        f"· 의도 지정: {'사람' if doc['intent_source'] == 'user' else 'AI'}"
+        + (f" · 정리 {fmt_seconds(doc['process_seconds'])}"
+           if service.config.show_timings and doc.get("process_seconds") is not None else ""),
     ]
     chain = service.db.version_chain(doc["version_group_id"] or doc["id"])
     if len(chain) > 1:
@@ -139,6 +157,22 @@ def doc_links(doc: dict, base_url: str) -> list[str]:
     elif base_url and doc.get("archive_path"):
         links.append(f"[드라이브 폴더]({base_url}) `{doc['archive_path'].split('/', 1)[-1]}`")
     return links
+
+
+def render_timing(timing: dict) -> str:
+    """/통계의 구간별 시간 (중앙값, 괄호는 측정 건수)."""
+    def row(label: str, key: str) -> str:
+        value, n = timing[key]
+        return f"- {label}: {fmt_seconds(value)} ({n}건)"
+
+    return "\n".join([
+        "**걸린 시간 (중앙값)**",
+        row("T1 정리 (올림 → 📌)", "process"),
+        row("T2 봇 응답 (`/찾아줘` → 결과)", "response"),
+        row("T3 고르기 (결과 → 공유)", "pick"),
+        row("T0 검색어 입력 (`/측정`)", "typing"),
+        row("전체 찾는 시간 (`/측정`)", "measure"),
+    ])
 
 
 def render_tags(topic_tags: list[str], counts: list[tuple[str, int]]) -> str:
@@ -220,9 +254,11 @@ class ShareButton(discord.ui.DynamicItem[discord.ui.Button], template=r"share:(?
         client: ArchiveBot = interaction.client  # type: ignore[assignment]
         service = client.service
         try:
-            doc = service.record_share(self.doc_id, interaction.user.id, self.event_id)
+            shared = service.record_share(self.doc_id, interaction.user.id, self.event_id)
         except LookupError as e:
             return await interaction.response.send_message(str(e), ephemeral=True)
+        doc = shared.doc
+        measured = client.finish_measure(interaction, shared)
         # 파일을 올리면 3초를 넘길 수 있으니 먼저 "처리 중"으로 응답해 둔다
         await interaction.response.defer(ephemeral=True, thinking=True)
         lines = [f"🔎 {interaction.user.mention}님이 찾은 자료: {one_line(doc)}", f"> {doc['summary']}"]
@@ -236,6 +272,8 @@ class ShareButton(discord.ui.DynamicItem[discord.ui.Button], template=r"share:(?
                 lines.append("(파일이 커서 채널에 직접 올리지 못했어요. 아래 링크로 열어 주세요)")
         if links:
             lines.append(" · ".join(links))
+        if client.config.show_timings and shared.total is not None:
+            lines.append(f"⏱ 찾는 데 {fmt_seconds(shared.total)}")
         try:
             await interaction.channel.send("\n".join(lines), files=files, suppress_embeds=True)  # type: ignore[union-attr]
         except discord.Forbidden:
@@ -245,7 +283,10 @@ class ShareButton(discord.ui.DynamicItem[discord.ui.Button], template=r"share:(?
         except discord.HTTPException:
             log.exception("공유 실패: 자료 #%s", doc["id"])
             return await interaction.followup.send("공유하다 문제가 생겼어요. 잠시 후 다시 눌러 주세요.", ephemeral=True)
-        await interaction.followup.send("채널에 공유했어요." + (" (파일 포함)" if files else ""), ephemeral=True)
+        done = "채널에 공유했어요." + (" (파일 포함)" if files else "")
+        if measured:
+            done += "\n" + measured
+        await interaction.followup.send(done, ephemeral=True)
 
 
 class TagSelect(discord.ui.DynamicItem[discord.ui.Select], template=r"tags:(?P<doc>\d+):(?P<mode>[pi])"):
@@ -350,6 +391,7 @@ class ArchiveBot(discord.Client):
         self.config = config
         self.service = service
         self.tree = app_commands.CommandTree(self)
+        self.measure_starts: dict[tuple[int, int], datetime] = {}   # (서버, 사용자) → /측정 시작 시각
         register_commands(self)
 
     async def setup_hook(self) -> None:
@@ -439,6 +481,12 @@ class ArchiveBot(discord.Client):
             await message.add_reaction("📌" if new else "♻️")
         except discord.HTTPException:
             pass
+        if new and not quiet:   # T1: 올린 순간부터 📌까지 (과거수집은 재지 않음)
+            took = (discord.utils.utcnow() - message.created_at).total_seconds()
+            if 0 <= took <= PROCESS_CAP:
+                for r in new:
+                    self.service.db.update_doc(r.doc["id"], process_seconds=round(took, 1))
+                    r.doc["process_seconds"] = round(took, 1)
         dups = [r.doc for r in results if r.duplicate and r.doc.get("message_id") != message.id]
         if not quiet and dups:
             try:   # 다시 올린 사람이 원본을 바로 찾을 수 있게 알려 준다
@@ -456,6 +504,31 @@ class ArchiveBot(discord.Client):
                     except discord.HTTPException:
                         log.warning("확인 메시지를 보내지 못했습니다: %s", message.jump_url)
         return len(new)
+
+    def start_measure(self, guild_id: int, user_id: int) -> None:
+        self.measure_starts[(guild_id, user_id)] = discord.utils.utcnow()
+
+    def finish_measure(self, interaction: discord.Interaction, shared) -> str | None:
+        """측정 모드였으면 전체 시간과 구간(T0 입력 + T2 응답 + T3 고르기)을 기록하고 안내 문구를 돌려준다."""
+        started = self.measure_starts.pop((interaction.guild_id, interaction.user.id), None)
+        if started is None:
+            return None
+        now = discord.utils.utcnow()
+        total = (now - started).total_seconds()
+        if total > MEASURE_WINDOW:
+            return None
+        guild, user, doc_id = interaction.guild_id, interaction.user.id, shared.doc["id"]
+        self.service.db.add_event(guild, "measure", user, doc_id, total)
+        parts = []
+        if shared.search_started is not None:
+            typing = max((shared.search_started - started).total_seconds(), 0.0)
+            self.service.db.add_event(guild, "measure_t0", user, doc_id, typing)
+            parts.append(f"검색어 입력 {fmt_seconds(typing)}")
+        if shared.response is not None:
+            parts.append(f"봇 응답 {fmt_seconds(shared.response)}")
+        if shared.pick is not None:
+            parts.append(f"고르기 {fmt_seconds(shared.pick)}")
+        return f"⏱ 측정 결과: 전체 {fmt_seconds(total)}" + (f" = {' + '.join(parts)}" if parts else "")
 
     async def _ingest_all(self, src: Source, attachments: list, urls: list[str],
                           context: list[str]) -> list[IngestResult]:
@@ -513,16 +586,21 @@ def register_commands(bot: ArchiveBot) -> None:
     @guild_only
     async def find(interaction: discord.Interaction, query: str):
         await interaction.response.defer(ephemeral=True, thinking=True)   # 3초 제한: "찾는 중" 먼저 표시
-        event_id, hits = await service.search(interaction.guild_id, interaction.user.id, query)
+        started = interaction.created_at   # 사용자가 명령을 보낸 시각
+        event_id, hits = await service.search(interaction.guild_id, interaction.user.id, query, started_at=started)
+        response = (discord.utils.utcnow() - started).total_seconds()   # T2
+        service.db.set_event_value(event_id, response)
+        took = f" · {fmt_seconds(response)}" if bot.config.show_timings else ""
         if not hits:
             return await interaction.followup.send(
-                f"'{query}'에 맞는 자료를 못 찾았어요. 다른 말로 다시 물어보거나 `/드라이브`의 자료 목록 시트를 확인해 보세요.",
+                f"'{query}'에 맞는 자료를 못 찾았어요{took}. 다른 말로 다시 물어보거나 `/드라이브`의 자료 목록 시트를 확인해 보세요.",
                 ephemeral=True)
         view = discord.ui.View(timeout=None)
         for i, hit in enumerate(hits, 1):
             view.add_item(ShareButton(hit.doc["id"], event_id, index=i))
         body = "\n\n".join(render_hit(i, h, bot.config.archive_base_url) for i, h in enumerate(hits, 1))
-        await interaction.followup.send(f"🔎 **{query}**\n\n{body}"[:2000], view=view, ephemeral=True,
+        header = f"🔎 **{query}**" + (f" · 결과 {len(hits)}건{took}" if took else "")
+        await interaction.followup.send(f"{header}\n\n{body}"[:2000], view=view, ephemeral=True,
                                         suppress_embeds=True)
 
     @tree.context_menu(name="자료 정보")
@@ -644,6 +722,14 @@ def register_commands(bot: ArchiveBot) -> None:
         lines.append("이 폴더를 ChatGPT·Gemini·Claude의 구글 드라이브 연결에 추가하면 AI가 팀 자료를 바로 읽어요.")
         await interaction.followup.send("\n".join(lines), ephemeral=True, suppress_embeds=True)
 
+    @tree.command(name="측정", description="찾기 시간 측정을 시작해요 (검증용). 찾아서 공유하면 걸린 시간을 알려 줘요.")
+    @guild_only
+    async def measure(interaction: discord.Interaction):
+        bot.start_measure(interaction.guild_id, interaction.user.id)
+        await interaction.response.send_message(
+            "⏱ 측정을 시작했어요. 지금부터 `/찾아줘`로 자료를 찾아 **공유 버튼**을 누르면, "
+            "검색어 입력·봇 응답·고르기에 걸린 시간을 알려 드려요. (15분 안에)", ephemeral=True)
+
     @tree.command(name="통계", description="자료 보관·검색 지표를 봐요.")
     @app_commands.rename(days="기간")
     @app_commands.describe(days="최근 며칠을 볼지 (기본 7일)")
@@ -661,7 +747,8 @@ def register_commands(bot: ArchiveBot) -> None:
             f"주제 태그 {pct(s['tag_corrected'], s['docs'])} ({s['tag_corrected']}건)을 사람이 고침\n"
             f"- 검색 소요 시간(중앙값): {median} — `/찾아줘`부터 공유 버튼까지\n"
             f"- 아카이브 재사용: `/찾아줘` {s['searches']}회, 공유 {s['shares']}회, "
-            f"다시 쓰인 자료 {pct(s['reused'], s['docs'])}", ephemeral=True)
+            f"다시 쓰인 자료 {pct(s['reused'], s['docs'])}\n"
+            f"{render_timing(s['timing'])}", ephemeral=True)
 
     @tree.error
     async def on_error(interaction: discord.Interaction, error: app_commands.AppCommandError):

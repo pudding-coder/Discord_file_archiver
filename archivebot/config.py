@@ -62,7 +62,8 @@ class Config:
     archive_base_url: str = ""
     topic_tags: list[str] = field(default_factory=lambda: _csv(DEFAULT_TAGS))
     confidence_threshold: float = 0.75
-    default_rules: bool = True        # 처음 쓸 때 태그·공유 의도 기준 규칙을 미리 등록
+    default_rules: bool = True
+    show_timings: bool = True         # 검색 결과·공유·자료 정보에 걸린 시간을 표시 (기록은 항상 함)        # 처음 쓸 때 태그·공유 의도 기준 규칙을 미리 등록
     context_messages: int = 3
     prompt_ttl: int = 600
     max_file_mb: int = 25
@@ -97,6 +98,7 @@ class Config:
             topic_tags=_csv(env("TOPIC_TAGS") or DEFAULT_TAGS),
             confidence_threshold=float(env("CONFIDENCE_THRESHOLD") or 0.75),
             default_rules=(env("DEFAULT_RULES") or "1").strip().lower() not in ("0", "false", "no", "off"),
+            show_timings=(env("SHOW_TIMINGS") or "1").strip().lower() not in ("0", "false", "no", "off"),
             context_messages=int(env("CONTEXT_MESSAGES") or 3),
             prompt_ttl=int(env("PROMPT_TTL") or 600),
             max_file_mb=int(env("MAX_FILE_MB") or 25),

@@ -45,6 +45,15 @@ class IngestResult:
 
 
 @dataclass
+class ShareResult:
+    doc: dict
+    total: float | None = None            # 명령 전송 → 공유 (T2+T3)
+    response: float | None = None         # 명령 전송 → 결과 표시 (T2)
+    pick: float | None = None             # 결과 표시 → 공유 (T3)
+    search_started: datetime | None = None
+
+
+@dataclass
 class SearchHit:
     doc: dict
     reason: str = ""
@@ -256,8 +265,11 @@ class ArchiveService:
         return doc
 
     # ── 검색·공유 ─────────────────────────────────────────
-    async def search(self, guild_id: int, user_id: int | None, query: str) -> tuple[int, list[SearchHit]]:
-        event_id = self.db.add_event(guild_id, "search", user_id)
+    async def search(self, guild_id: int, user_id: int | None, query: str,
+                     started_at: datetime | None = None) -> tuple[int, list[SearchHit]]:
+        """started_at: 사용자가 명령을 보낸 시각. 검색 이벤트의 시작으로 기록해 응답·고르기 시간을 잰다."""
+        event_id = self.db.add_event(guild_id, "search", user_id,
+                                     created_at=started_at.isoformat(timespec="milliseconds") if started_at else None)
         docs = self.db.list_docs(guild_id)
         if not docs:
             return event_id, []
@@ -292,15 +304,20 @@ class ArchiveService:
         latest = chain[-1] if chain else doc
         return latest if latest["id"] != doc["id"] else None
 
-    def record_share(self, doc_id: int, user_id: int | None, search_event_id: int | None) -> dict:
+    def record_share(self, doc_id: int, user_id: int | None, search_event_id: int | None) -> "ShareResult":
+        """공유를 기록하고 걸린 시간을 돌려준다: 전체(T2+T3)는 명령을 보낸 순간부터, 고르기(T3)는 결과가 뜬 뒤부터."""
         doc = self._require(doc_id)
-        elapsed = None
+        result = ShareResult(doc=doc)
         if search_event_id and (event := self.db.get_event(search_event_id)):
-            started = datetime.fromisoformat(event["created_at"])
-            elapsed = (datetime.now(timezone.utc) - started).total_seconds()
-        self.db.add_event(doc["guild_id"], "share", user_id, doc_id, elapsed)
+            result.search_started = datetime.fromisoformat(event["created_at"])
+            result.total = (datetime.now(timezone.utc) - result.search_started).total_seconds()
+            result.response = event["value"]
+            if result.response is not None:
+                result.pick = max(result.total - result.response, 0.0)
+                self.db.add_event(doc["guild_id"], "pick", user_id, doc_id, result.pick)
+        self.db.add_event(doc["guild_id"], "share", user_id, doc_id, result.total)
         self.db.bump_reuse(doc_id)
-        return doc
+        return result
 
     def archive_file(self, doc: dict) -> Path | None:
         if not doc.get("archive_path"):

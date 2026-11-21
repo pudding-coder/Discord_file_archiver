@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS documents (
     reuse_count INTEGER NOT NULL DEFAULT 0,
     drive_file_id TEXT,                          -- 구글 드라이브에 올린 사본
     drive_url TEXT,
-    drive_name TEXT,                             -- 드라이브에 붙인 파일 이름 (바뀌면 이름을 고친다)
+    drive_name TEXT,
+    process_seconds REAL,                        -- 올린 순간부터 📌까지 걸린 시간 (T1)                             -- 드라이브에 붙인 파일 이름 (바뀌면 이름을 고친다)
     created_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_doc_sha ON documents(guild_id, sha256);
@@ -85,6 +86,14 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    values = sorted(values)
+    mid = len(values) // 2
+    return values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2
+
+
 def _doc(row: sqlite3.Row | None) -> dict | None:
     if row is None:
         return None
@@ -110,6 +119,8 @@ class Database:
         for name in ("drive_file_id", "drive_url", "drive_name"):
             if name not in cols:
                 self.conn.execute(f"ALTER TABLE documents ADD COLUMN {name} TEXT")
+        if "process_seconds" not in cols:
+            self.conn.execute("ALTER TABLE documents ADD COLUMN process_seconds REAL")
         if "pending_tags" not in cols:
             self.conn.execute("ALTER TABLE documents ADD COLUMN pending_tags INTEGER NOT NULL DEFAULT 0")
 
@@ -264,13 +275,17 @@ class Database:
         return [dict(r) for r in rows]
 
     def add_event(self, guild_id: int, type_: str, user_id: int | None = None,
-                  doc_id: int | None = None, value: float | None = None) -> int:
+                  doc_id: int | None = None, value: float | None = None, created_at: str | None = None) -> int:
         cur = self.conn.execute(
             "INSERT INTO events (guild_id, type, user_id, doc_id, value, created_at) VALUES (?,?,?,?,?,?)",
-            (guild_id, type_, user_id, doc_id, value, now_iso()),
+            (guild_id, type_, user_id, doc_id, value, created_at or now_iso()),
         )
         self.conn.commit()
         return int(cur.lastrowid)
+
+    def set_event_value(self, event_id: int, value: float) -> None:
+        self.conn.execute("UPDATE events SET value = ? WHERE id = ?", (value, event_id))
+        self.conn.commit()
 
     def get_event(self, event_id: int) -> dict | None:
         row = self.conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
@@ -290,16 +305,24 @@ class Database:
             "WHERE a.guild_id = ? AND d.created_at >= ? AND a.action = 'tags' AND a.before != a.after"
         )
         count = lambda t: q("SELECT COUNT(*) FROM events WHERE guild_id = ? AND created_at >= ? AND type = ?", t)  # noqa: E731
-        times = sorted(
-            r[0] for r in self.conn.execute(
-                "SELECT value FROM events WHERE guild_id = ? AND created_at >= ? AND type = 'share' "
-                "AND value IS NOT NULL", (guild_id, since))
-        )
-        median = None
-        if times:
-            mid = len(times) // 2
-            median = times[mid] if len(times) % 2 else (times[mid - 1] + times[mid]) / 2
+        def event_values(type_: str) -> list[float]:
+            return [r[0] for r in self.conn.execute(
+                "SELECT value FROM events WHERE guild_id = ? AND created_at >= ? AND type = ? AND value IS NOT NULL",
+                (guild_id, since, type_))]
+
+        process = [r[0] for r in self.conn.execute(
+            "SELECT process_seconds FROM documents WHERE guild_id = ? AND created_at >= ? "
+            "AND process_seconds IS NOT NULL", (guild_id, since))]
+        median = _median(event_values("share"))
         return {
+            # 구간별 시간 (초, 중앙값) — 검증 매뉴얼의 T0~T3
+            "timing": {
+                "process": (_median(process), len(process)),                       # T1 올림 → 📌
+                "response": (_median(event_values("search")), len(event_values("search"))),   # T2 봇 응답
+                "pick": (_median(event_values("pick")), len(event_values("pick"))),          # T3 고르기
+                "measure": (_median(event_values("measure")), len(event_values("measure"))),  # 측정 모드 전체
+                "typing": (_median(event_values("measure_t0")), len(event_values("measure_t0"))),  # T0 입력
+            },
             "days": days, "docs": docs, "corrected": corrected, "tag_corrected": tag_fixed, "reused": reused,
             "searches": count("search"), "shares": count("share"),
             "rerequests": count("rerequest"), "reshares": count("reshare"),

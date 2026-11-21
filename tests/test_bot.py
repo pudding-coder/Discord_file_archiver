@@ -337,7 +337,7 @@ async def test_share_posts_the_file_itself(config, service, src):
         replies.append(content)
 
     interaction = SimpleNamespace(
-        client=SimpleNamespace(service=service, config=config),
+        client=ArchiveBot(config, service), guild_id=1,
         user=SimpleNamespace(id=9, display_name="지현", mention="<@9>"),
         guild=SimpleNamespace(filesize_limit=10 * 1024 * 1024),
         channel=SimpleNamespace(send=channel_send),
@@ -422,3 +422,67 @@ async def test_meme_link_gets_no_reaction(config, service):
     msg = FakeMessage("ㅋㅋ https://klipy.com/gifs/x")
     await bot.on_message(msg)
     assert msg.reactions == [] and msg.replies == [] and service.db.list_docs(1) == []
+
+
+
+# ── 걸린 시간 표시·측정 ────────────────────────────────────
+def test_fmt_seconds():
+    from archivebot.bot import fmt_seconds
+
+    assert [fmt_seconds(v) for v in (None, 1.234, 23.6, 125)] == ["–", "1.2초", "24초", "2분 5초"]
+
+
+async def test_processing_time_is_recorded_and_shown(config, service):
+    from datetime import timedelta
+
+    import discord
+
+    bot = ArchiveBot(config, service)
+    msg = FakeMessage("이거 봐줘", [FakeAttachment("a.pdf", make_pdf("x"))])
+    msg.created_at = discord.utils.utcnow() - timedelta(seconds=3)
+    await bot.on_message(msg)
+    doc = service.db.list_docs(1)[0]
+    assert 3 <= doc["process_seconds"] < 10
+    assert "(정리 " in msg.replies[0][0]                       # 확인 답글
+    assert "· 정리 " in render_info(service, doc)              # 자료 정보
+    config.show_timings = False
+    assert "정리" not in render_info(service, doc).split("\n")[2]
+
+    old = FakeMessage("", [FakeAttachment("b.pdf", make_pdf("y"))], mid=2)   # 봇이 꺼져 있던 동안 올라온 것
+    old.created_at = discord.utils.utcnow() - timedelta(hours=2)
+    await bot.on_message(old)
+    assert service.db.get_doc(max(d["id"] for d in service.db.list_docs(1)))["process_seconds"] is None
+
+
+async def test_search_response_pick_and_measure_mode(config, service, src):
+    from datetime import timedelta
+
+    import discord
+
+    from archivebot.bot import render_timing
+
+    await service.ingest_file(src, "IR자료.pdf", make_pdf("pitch"), [])
+    bot = ArchiveBot(config, service)
+    now = discord.utils.utcnow()
+    bot.measure_starts[(1, 9)] = now - timedelta(seconds=30)        # /측정 시작 30초 전
+    sent = now - timedelta(seconds=12)                                # 18초 동안 검색어 입력 후 전송
+    event_id, hits = await service.search(1, 9, "IR", started_at=sent)
+    service.db.set_event_value(event_id, 2.0)                         # 응답 2초
+
+    shared = service.record_share(hits[0].doc["id"], 9, event_id)
+    assert 11 <= shared.total <= 14 and shared.response == 2.0 and 9 <= shared.pick <= 12
+    note = bot.finish_measure(SimpleNamespace(guild_id=1, user=SimpleNamespace(id=9)), shared)
+    assert note.startswith("⏱ 측정 결과: 전체 3") and "검색어 입력 18초" in note and "봇 응답 2.0초" in note
+    assert (1, 9) not in bot.measure_starts                           # 한 번 쓰면 끝
+
+    timing = service.db.stats(1, 7)["timing"]
+    assert timing["response"] == (2.0, 1) and timing["measure"][1] == 1 and 17 <= timing["typing"][0] <= 19
+    text = render_timing(timing)
+    assert "T2 봇 응답" in text and "(1건)" in text
+
+    bot.measure_starts[(1, 9)] = now - timedelta(minutes=30)          # 15분이 지나면 측정 아님
+    assert bot.finish_measure(SimpleNamespace(guild_id=1, user=SimpleNamespace(id=9)), shared) is None
+
+
+def test_measure_command_registered(config, service):
+    assert "측정" in {c.name for c in ArchiveBot(config, service).tree.get_commands()}
