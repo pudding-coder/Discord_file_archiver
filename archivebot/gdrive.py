@@ -182,6 +182,7 @@ class GoogleSync:
             try:
                 folder = await self._folder(guild_id)
                 # 단계마다 따로 돈다: 파일 하나가 계속 실패해도 이름 정리·시트 갱신은 된다
+                await self._trash_deleted(guild_id, failures)
                 uploaded = await self._upload_pending(guild_id, folder, failures)
                 renamed = await self._rename_changed(guild_id, failures)
                 if uploaded or renamed:
@@ -200,6 +201,25 @@ class GoogleSync:
                 self._dirty.add(guild_id)   # 다음 주기에 다시 시도
                 raise failures[0]
             return uploaded
+
+    async def _trash_deleted(self, guild_id: int, failures: list[Exception] | None = None) -> int:
+        """봇에서 지운 자료의 드라이브 파일을 휴지통으로 보낸다 (30일 안에는 드라이브에서 되살릴 수 있다)."""
+        pending = json.loads(self.db.get_setting(guild_id, "drive_trash") or "[]")
+        left, trashed = [], 0
+        for file_id in pending:
+            try:
+                await asyncio.to_thread(self._trash, file_id)
+                trashed += 1
+            except Exception as e:
+                if _status(e) == 404:
+                    continue   # 이미 드라이브에서 지워진 파일
+                log.warning("드라이브 파일을 휴지통으로 보내지 못했습니다 (%s): %s", file_id, e)
+                left.append(file_id)
+                if failures is not None:
+                    failures.append(e)
+        if pending:
+            self.db.set_setting(guild_id, "drive_trash", json.dumps(left) if left else None)
+        return trashed
 
     async def _upload_pending(self, guild_id: int, folder: str, failures: list[Exception] | None = None) -> int:
         uploaded = 0
@@ -300,6 +320,10 @@ class GoogleSync:
 
     def _rename(self, file_id: str, name: str) -> None:
         self.drive.files().update(fileId=file_id, body={"name": name}, fields="id",
+                                  supportsAllDrives=True).execute(num_retries=RETRIES)
+
+    def _trash(self, file_id: str) -> None:
+        self.drive.files().update(fileId=file_id, body={"trashed": True}, fields="id",
                                   supportsAllDrives=True).execute(num_retries=RETRIES)
 
     def _create_sheet(self, folder: str) -> str:

@@ -145,6 +145,10 @@ class Database:
         self.conn.execute(f"UPDATE documents SET {sets} WHERE id = ?", [*fields.values(), doc_id])
         self.conn.commit()
 
+    def delete_doc(self, doc_id: int) -> None:
+        self.conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+        self.conn.commit()
+
     def get_doc(self, doc_id: int) -> dict | None:
         return _doc(self.conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone())
 

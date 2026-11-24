@@ -67,10 +67,14 @@ class FakeGoogle:
 
     def update(self, body, spreadsheetId=None, range=None, valueInputOption=None, fileId=None, fields=None,
                supportsAllDrives=None):
-        if fileId is not None:                       # drive.files().update: 이름 바꾸기
+        if fileId is not None:                       # drive.files().update: 이름 바꾸기·휴지통
             def rename():
                 if fileId not in self.store:
                     raise FakeHttpError(404)
+                if body.get("trashed"):
+                    self.store[fileId]["trashed"] = True
+                    self.calls.append(f"trash:{fileId}")
+                    return
                 self.store[fileId]["name"] = body["name"]
                 self.calls.append(f"rename:{body['name']}")
             return Call(rename)
@@ -327,3 +331,17 @@ async def test_sheet_shows_drive_file_name(service, src, google):
     rows = google.sheet_values[service.db.get_setting(1, "drive_sheet_id")]
     col = rows[0].index("드라이브 파일명")
     assert rows[1][col] == service.db.get_doc(doc["id"])["drive_name"] and rows[1][col].endswith(".txt")
+
+
+async def test_deleted_doc_is_trashed_on_drive_and_removed_from_sheet(service, src, google):
+    keep = (await service.ingest_file(src, "keep.pdf", make_pdf("keep"), [])).doc
+    gone = (await service.ingest_file(src, "gone.pdf", make_pdf("gone"), [])).doc
+    await service.sync.wait_idle()
+    file_id = service.db.get_doc(gone["id"])["drive_file_id"]
+    service.delete_doc(gone["id"], 7, "민수")
+    await service.sync.wait_idle()
+    assert google.store[file_id].get("trashed") and f"trash:{file_id}" in google.calls
+    assert service.db.get_setting(1, "drive_trash") is None
+    sheet = service.db.get_setting(1, "drive_sheet_id")
+    titles = [row[2] for row in google.sheet_values[sheet][1:]]
+    assert titles == [keep["title"]]

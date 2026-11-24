@@ -5,6 +5,7 @@ import asyncio
 import csv
 import hashlib
 import io
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -248,6 +249,32 @@ class ArchiveService:
         if not tags:
             raise ValueError("태그를 하나 이상 골라 주세요.")
         return self.edit_doc(doc_id, actor_id, actor_name, tags=tags)
+
+    def delete_doc(self, doc_id: int, actor_id: int | None, actor_name: str) -> dict:
+        """보관한 자료를 지운다: 목록·검색에서 빼고, 서버의 사본을 지우고, 드라이브 파일은 휴지통으로 보낸다.
+        같은 파일을 다시 올리면 새 자료로 보관된다. 버전 묶음의 다른 자료는 그대로 남는다."""
+        doc = self._require(doc_id)
+        guild = doc["guild_id"]
+        group = doc["version_group_id"] or doc_id
+        others = [d for d in self.db.version_chain(group) if d["id"] != doc_id]
+        if others and group == doc_id:
+            new_group = others[0]["id"]   # 묶음의 기준이던 자료를 지우면 남은 첫 자료가 기준이 된다
+            for d in others:
+                self.db.update_doc(d["id"], version_group_id=new_group)
+        self.db.delete_doc(doc_id)
+        if path := self.archive_file(doc):
+            try:
+                path.unlink()
+            except OSError:
+                log.warning("사본 파일을 지우지 못했습니다: %s", path)
+        if doc.get("drive_file_id"):
+            pending = json.loads(self.db.get_setting(guild, "drive_trash") or "[]")
+            pending.append(doc["drive_file_id"])
+            self.db.set_setting(guild, "drive_trash", json.dumps(pending))
+        self.db.audit(guild, doc_id, actor_id, actor_name, "delete",
+                      f"{doc['title']} v{doc['version_no']}", None)
+        self.refresh_index(guild)
+        return doc
 
     def ensure_default_rules(self, guild_id: int) -> None:
         """서버에서 처음 쓸 때 한 번만 기본 규칙을 넣는다. 팀이 지운 규칙은 다시 넣지 않는다."""

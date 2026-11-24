@@ -123,7 +123,7 @@ async def test_panels_render(config, service, src):
     done = service.set_tags(done["id"], ["발표"], 7, "민수")
     assert build_panel_view(done, "p") is None
     info_ids = [c.custom_id for c in build_panel_view(done, "i", config.topic_tags).children]
-    assert len(info_ids) == 6 and info_ids[-1] == f"title:{done['id']}"   # 의도 4 + 태그 메뉴 + 제목 고치기
+    assert len(info_ids) == 7 and info_ids[-2:] == [f"title:{done['id']}", f"del:{done['id']}:ask"]   # 의도 4 + 태그 메뉴 + 제목 + 삭제
     assert "v1 IR_v1" in render_info(service, done)
     hit = render_hit(1, SearchHit(doc=v1, latest=v2), "https://drive.example/folder")
     assert "최신본이 아니에요" in hit and "원문 메시지" in hit and "드라이브 폴더" in hit
@@ -486,3 +486,33 @@ async def test_search_response_pick_and_measure_mode(config, service, src):
 
 def test_measure_command_registered(config, service):
     assert "측정" in {c.name for c in ArchiveBot(config, service).tree.get_commands()}
+
+
+async def test_delete_button_asks_checks_permission_and_deletes(config, service, src):
+    from archivebot.bot import DeleteButton
+
+    doc = (await service.ingest_file(src, "a.pdf", make_pdf("a"), [])).doc   # src의 올린이 id
+    sent = []
+
+    async def send_message(content, **kwargs):
+        sent.append(("send", content, kwargs))
+
+    async def edit_message(**kwargs):
+        sent.append(("edit", kwargs.get("content"), kwargs))
+
+    def interaction(user_id, manage=False):
+        perms = SimpleNamespace(manage_messages=manage, administrator=False)
+        return SimpleNamespace(
+            client=SimpleNamespace(service=service, get_channel=lambda _id: None),
+            user=SimpleNamespace(id=user_id, display_name="지현", guild_permissions=perms),
+            response=SimpleNamespace(send_message=send_message, edit_message=edit_message))
+
+    await DeleteButton(doc["id"], "ask").callback(interaction(999))
+    assert "만 지울 수 있어요" in sent[-1][1] and service.db.get_doc(doc["id"])          # 남의 자료는 못 지움
+    await DeleteButton(doc["id"], "ask").callback(interaction(999, manage=True))
+    ids = [c.custom_id for c in sent[-1][2]["view"].children]
+    assert "지울까요" in sent[-1][1] and ids == [f"del:{doc['id']}:yes", f"del:{doc['id']}:no"]
+    await DeleteButton(doc["id"], "no").callback(interaction(999, manage=True))
+    assert service.db.get_doc(doc["id"]) and sent[-1][1] == "지우지 않았어요."
+    await DeleteButton(doc["id"], "yes").callback(interaction(doc["author_id"]))
+    assert service.db.get_doc(doc["id"]) is None and "지웠어요" in sent[-1][1]

@@ -98,7 +98,7 @@ def render_info(service: ArchiveService, doc: dict) -> str:
             for d in chain))
     if doc.get("jump_url"):
         lines.append(f"[원문 메시지]({doc['jump_url']})")
-    lines.append("공유 의도·태그·제목이 다르면 아래에서 고쳐 주세요. 고친 내용은 모두 기록돼요.")
+    lines.append("공유 의도·태그·제목이 다르면 아래에서 고쳐 주세요. 잘못 보관된 자료는 🗑️ 삭제로 뺄 수 있어요.")
     return "\n".join(lines)
 
 
@@ -353,6 +353,69 @@ class TitleButton(discord.ui.DynamicItem[discord.ui.Button], template=r"title:(?
         await interaction.response.send_modal(TitleModal(doc))
 
 
+def can_delete(interaction: discord.Interaction, doc: dict) -> bool:
+    """올린 사람이거나 메시지 관리 권한이 있는 사람만 지울 수 있다."""
+    if interaction.user.id == doc.get("author_id"):
+        return True
+    perms = getattr(interaction.user, "guild_permissions", None)
+    return bool(perms and (perms.manage_messages or perms.administrator))
+
+
+class DeleteButton(discord.ui.DynamicItem[discord.ui.Button], template=r"del:(?P<doc>\d+):(?P<step>ask|yes|no)"):
+    """'자료 정보'의 🗑 삭제 → 한 번 더 묻고(ask) → 지운다(yes) / 그만둔다(no)."""
+    def __init__(self, doc_id: int, step: str = "ask"):
+        label, style, emoji = {
+            "ask": ("삭제", discord.ButtonStyle.danger, "🗑️"),
+            "yes": ("네, 지울게요", discord.ButtonStyle.danger, None),
+            "no": ("그만두기", discord.ButtonStyle.secondary, None),
+        }[step]
+        super().__init__(discord.ui.Button(label=label, style=style, emoji=emoji, row=3,
+                                           custom_id=f"del:{doc_id}:{step}"))
+        self.doc_id, self.step = doc_id, step
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(int(match["doc"]), match["step"])
+
+    async def callback(self, interaction: discord.Interaction):
+        service: ArchiveService = interaction.client.service  # type: ignore[attr-defined]
+        if self.step == "no":
+            return await interaction.response.edit_message(content="지우지 않았어요.", view=None)
+        doc = service.db.get_doc(self.doc_id)
+        if doc is None:
+            return await interaction.response.send_message(f"자료 #{self.doc_id}는 이미 지워졌어요.", ephemeral=True)
+        if not can_delete(interaction, doc):
+            return await interaction.response.send_message(
+                "자료를 올린 사람이나 메시지 관리 권한이 있는 사람만 지울 수 있어요.", ephemeral=True)
+        if self.step == "ask":
+            view = discord.ui.View(timeout=None)
+            view.add_item(DeleteButton(self.doc_id, "yes"))
+            view.add_item(DeleteButton(self.doc_id, "no"))
+            where = "목록·검색·시트에서 빠지고, 드라이브 파일은 휴지통으로 가요." if doc.get("drive_file_id") \
+                else "목록·검색·시트에서 빠져요."
+            return await interaction.response.send_message(
+                f"🗑️ {one_line(doc)} 을(를) 지울까요?\n{where} 디스코드 원문 메시지는 그대로 남아요.",
+                view=view, ephemeral=True, suppress_embeds=True)
+        service.delete_doc(self.doc_id, interaction.user.id, interaction.user.display_name)
+        await interaction.response.edit_message(
+            content=f"🗑️ 「{doc['title']}」을(를) 지웠어요. 같은 파일을 다시 올리면 새로 보관돼요.", view=None)
+        await _unmark_message(interaction.client, doc)
+
+
+async def _unmark_message(client: discord.Client, doc: dict) -> None:
+    """원문 메시지에 봇이 붙인 📌·♻️ 표시를 뗀다 (같은 메시지의 다른 자료가 남아 있으면 그대로 둔다)."""
+    service: ArchiveService = client.service  # type: ignore[attr-defined]
+    if not doc.get("message_id") or service.db.docs_by_message(doc["message_id"]):
+        return
+    try:
+        channel = client.get_channel(doc["channel_id"]) or await client.fetch_channel(doc["channel_id"])
+        message = await channel.fetch_message(doc["message_id"])
+        for emoji in ("📌", "♻️"):
+            await message.remove_reaction(emoji, client.user)
+    except (discord.HTTPException, AttributeError):
+        pass
+
+
 def build_panel_view(doc: dict, mode: str, topic_tags: list[str] | tuple = ()) -> discord.ui.View | None:
     """mode p: 자료를 올린 직후의 확인 메시지(애매한 것만 묻는다) / i: '자료 정보' 패널(항상 수정 가능)."""
     view = discord.ui.View(timeout=None)
@@ -366,6 +429,7 @@ def build_panel_view(doc: dict, mode: str, topic_tags: list[str] | tuple = ()) -
         view.add_item(VersionButton(doc["id"], "split"))
     if mode == "i":
         view.add_item(TitleButton(doc["id"]))
+        view.add_item(DeleteButton(doc["id"]))
     return view if view.children else None
 
 
@@ -395,7 +459,7 @@ class ArchiveBot(discord.Client):
         register_commands(self)
 
     async def setup_hook(self) -> None:
-        self.add_dynamic_items(IntentButton, VersionButton, ShareButton, TagSelect, TitleButton)
+        self.add_dynamic_items(IntentButton, VersionButton, ShareButton, TagSelect, TitleButton, DeleteButton)
         if self.service.sync is not None:
             self.service.sync.guild_name = lambda gid: getattr(self.get_guild(gid), "name", None) or str(gid)
             self._drive_task = asyncio.create_task(self.service.sync.run_forever())

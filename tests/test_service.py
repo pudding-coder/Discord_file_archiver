@@ -244,3 +244,22 @@ def test_prompt_tells_ai_to_judge_links():
     from archivebot.llm import SYSTEM
 
     assert "링크도 내용을 보고 판단하세요" in SYSTEM and "GIF" in SYSTEM
+
+
+async def test_delete_doc_removes_copy_relinks_versions_and_allows_reupload(service, src, config):
+    v1 = (await service.ingest_file(src, "IR자료_v1.pdf", make_pdf("first draft"), [])).doc
+    v2 = (await service.ingest_file(src, "IR자료_v2.pdf", make_pdf("second draft"), [])).doc
+    assert v2["version_group_id"] == v1["id"]
+    copy = service.archive_file(v1)
+    assert copy and copy.exists()
+
+    service.delete_doc(v1["id"], 7, "민수")
+    assert service.db.get_doc(v1["id"]) is None and not copy.exists()
+    left = service.db.get_doc(v2["id"])
+    assert left["version_group_id"] == v2["id"] and service.newer_version(left) is None
+    assert service.db.audit_for(v1["id"])[-1]["action"] == "delete"
+    assert "IR자료_v1" not in (config.archive_dir / "1" / "INDEX.md").read_text(encoding="utf-8")
+    again = await service.ingest_file(src, "IR자료_v1.pdf", make_pdf("first draft"), [])
+    assert again.doc["id"] != v1["id"] and not again.duplicate     # 같은 파일을 다시 올리면 새로 보관
+    with pytest.raises(LookupError):
+        service.delete_doc(v1["id"], 7, "민수")
