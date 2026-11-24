@@ -27,3 +27,28 @@ def test_core_name_strips_version_marks():
 def test_similarity():
     assert search.similarity("전략보고서_v1.pdf", "", "전략보고서_v2.pdf", "") == 1.0
     assert search.similarity("전략보고서.pdf", "", "회의록.pdf", "") < 0.3
+
+
+def test_format_words_drop_links_and_other_files():
+    from archivebot.service import filter_by_format
+
+    by_id = {
+        1: {"id": 1, "kind": "link", "filename": None},                    # 발표자료 제출 링크
+        2: {"id": 2, "kind": "file", "filename": "StudyMeta_IR.pptx"},
+        3: {"id": 3, "kind": "file", "filename": "회의록.docx"},
+    }
+    picks = [(1, ""), (2, ""), (3, "")]
+    assert filter_by_format("발표용 피피티 찾아줘", picks, by_id) == [(2, "")]
+    assert filter_by_format("IR 자료 찾아줘", picks, by_id) == picks             # 형식을 말하지 않으면 그대로
+    assert filter_by_format("엑셀 파일", picks, by_id) == picks                  # 맞는 형식이 없으면 그대로
+
+
+def test_search_prompt_shows_kind():
+    from archivebot.llm import SEARCH_SYSTEM, build_search_prompt
+
+    prompt = build_search_prompt("발표용 피피티", [
+        {"id": 1, "title": "발표자료 제출 링크", "kind": "link", "url": "https://x"},
+        {"id": 2, "title": "IR", "kind": "file", "filename": "IR.pptx"},
+    ], [])
+    assert "종류: 링크" in prompt and "종류: 파일(pptx)" in prompt
+    assert "제출 링크" in SEARCH_SYSTEM

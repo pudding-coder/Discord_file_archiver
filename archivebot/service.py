@@ -66,6 +66,32 @@ def _safe_name(name: str) -> str:
     return name[:100] or "file"
 
 
+# 질문에 파일 형식이 나오면 그 형식의 파일만 남긴다 (예: "발표용 피피티"에 '발표자료 제출 링크'가 섞이지 않게)
+FORMAT_WORDS: list[tuple[re.Pattern, set[str]]] = [
+    (re.compile(r"피피티|ppt|파워포인트|슬라이드|키노트|keynote", re.IGNORECASE), {"ppt", "pptx", "key", "odp", "pdf"}),
+    (re.compile(r"pdf|피디에프", re.IGNORECASE), {"pdf"}),
+    (re.compile(r"엑셀|excel|xlsx|스프레드시트|csv", re.IGNORECASE), {"xls", "xlsx", "csv"}),
+    (re.compile(r"워드|docx|한글\s*파일|hwp", re.IGNORECASE), {"doc", "docx", "hwp", "hwpx"}),
+    (re.compile(r"사진|이미지|그림|캡처|png|jpe?g", re.IGNORECASE), {"png", "jpg", "jpeg", "webp", "gif"}),
+]
+
+
+def filter_by_format(query: str, picks: list[tuple[int, str]], by_id: dict[int, dict]) -> list[tuple[int, str]]:
+    wanted: set[str] = set()
+    for pattern, exts in FORMAT_WORDS:
+        if pattern.search(query):
+            wanted |= exts
+    if not wanted:
+        return picks
+
+    def matches(doc_id: int) -> bool:
+        d = by_id.get(doc_id)
+        return bool(d and d["kind"] == "file" and extension(d.get("filename") or "") in wanted)
+
+    kept = [p for p in picks if matches(p[0])]
+    return kept or picks   # 그 형식 파일이 하나도 없으면 원래 결과를 그대로 보여 준다
+
+
 class ArchiveService:
     def __init__(self, config: Config, db: Database, analyzer=None, link_fetcher=fetch_link):
         self.config = config
@@ -317,6 +343,7 @@ class ArchiveService:
             log.exception("AI 검색 실패 — 어휘 검색 결과로 대체합니다")
             picks = [(d["id"], "") for d in ranked[:5]]
         by_id = {d["id"]: d for d in docs}
+        picks = filter_by_format(query, picks, by_id)
         hits, seen = [], set()
         for doc_id, reason in picks:
             doc = by_id.get(doc_id)
