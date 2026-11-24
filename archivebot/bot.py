@@ -238,9 +238,10 @@ class VersionButton(discord.ui.DynamicItem[discord.ui.Button], template=r"ver:(?
 
 
 class ShareButton(discord.ui.DynamicItem[discord.ui.Button], template=r"share:(?P<doc>\d+):(?P<event>\d+)"):
-    def __init__(self, doc_id: int, event_id: int, index: int = 0):
+    def __init__(self, doc_id: int, event_id: int, index: int = 0, channel: str = ""):
+        where = f"#{channel}"[:40] if channel else "채널"
         super().__init__(discord.ui.Button(
-            label=f"{index}번 채널에 공유" if index else "채널에 공유", emoji="📣",
+            label=f"{index}번 자료 {where}에 공유" if index else f"{where}에 공유", emoji="📣",
             style=discord.ButtonStyle.primary if index == 1 else discord.ButtonStyle.secondary,
             custom_id=f"share:{doc_id}:{event_id}",
         ))
@@ -283,7 +284,8 @@ class ShareButton(discord.ui.DynamicItem[discord.ui.Button], template=r"share:(?
         except discord.HTTPException:
             log.exception("공유 실패: 자료 #%s", doc["id"])
             return await interaction.followup.send("공유하다 문제가 생겼어요. 잠시 후 다시 눌러 주세요.", ephemeral=True)
-        done = "채널에 공유했어요." + (" (파일 포함)" if files else "")
+        name = getattr(interaction.channel, "name", None)
+        done = (f"#{name}에 공유했어요." if name else "채널에 공유했어요.") + (" (파일 포함)" if files else "")
         if measured:
             done += "\n" + measured
         await interaction.followup.send(done, ephemeral=True)
@@ -661,7 +663,8 @@ def register_commands(bot: ArchiveBot) -> None:
                 ephemeral=True)
         view = discord.ui.View(timeout=None)
         for i, hit in enumerate(hits, 1):
-            view.add_item(ShareButton(hit.doc["id"], event_id, index=i))
+            view.add_item(ShareButton(hit.doc["id"], event_id, index=i,
+                                      channel=getattr(interaction.channel, "name", "") or ""))
         body = "\n\n".join(render_hit(i, h, bot.config.archive_base_url) for i, h in enumerate(hits, 1))
         header = f"🔎 **{query}**" + (f" · 결과 {len(hits)}건{took}" if took else "")
         await interaction.followup.send(f"{header}\n\n{body}"[:2000], view=view, ephemeral=True,

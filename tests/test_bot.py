@@ -340,12 +340,13 @@ async def test_share_posts_the_file_itself(config, service, src):
         client=ArchiveBot(config, service), guild_id=1,
         user=SimpleNamespace(id=9, display_name="지현", mention="<@9>"),
         guild=SimpleNamespace(filesize_limit=10 * 1024 * 1024),
-        channel=SimpleNamespace(send=channel_send),
+        channel=SimpleNamespace(send=channel_send, name="일반"),
         response=SimpleNamespace(defer=defer, send_message=None),
         followup=SimpleNamespace(send=followup_send))
     await ShareButton(doc["id"], 0).callback(interaction)
     assert deferred and posted[0][1] == ["발표자료.pdf"] and "원문 메시지" in posted[0][0]
-    assert replies == ["채널에 공유했어요. (파일 포함)"]
+    assert replies == ["#일반에 공유했어요. (파일 포함)"]
+    assert ShareButton(doc["id"], 0, index=2, channel="일반").item.label == "2번 자료 #일반에 공유"
 
     interaction.guild.filesize_limit = 10                    # 서버 한도보다 크면 링크만
     await ShareButton(doc["id"], 0).callback(interaction)
