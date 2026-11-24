@@ -5,6 +5,7 @@ GeminiAnalyzer(무료 API 사용 가능)나 ClaudeAnalyzer를 쓰고, API 키가
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import re
@@ -249,11 +250,36 @@ class GeminiAnalyzer:
         self._model_checked = False
         self._thinking_ok = True   # 생각 줄이기 설정을 모델이 거부하면 끈다
 
+    # 503(사용자 몰림) 같은 일시 오류: 잠깐 기다렸다 다시, 그래도 안 되면 가벼운 모델로 한 번
+    RETRY_DELAYS = (2.0, 5.0)
+    BACKUP_MODEL = "gemini-flash-lite-latest"
+
+    async def _generate_with_retry(self, system: str, contents: list, schema: type[BaseModel]):
+        from google.genai import errors
+
+        for delay in (*self.RETRY_DELAYS, None):
+            try:
+                return await self._generate(system, contents, schema)
+            except errors.ServerError as e:
+                if delay is None:
+                    last = e
+                    break
+                log.warning("Gemini 일시 오류 %s — %.0f초 뒤 다시 시도합니다", getattr(e, "code", ""), delay)
+                await asyncio.sleep(delay)
+        if self.BACKUP_MODEL and self.BACKUP_MODEL != self.model:
+            log.warning("Gemini %s이(가) 계속 바빠서 이번 요청은 %s(으)로 보냅니다", self.model, self.BACKUP_MODEL)
+            main, self.model = self.model, self.BACKUP_MODEL
+            try:
+                return await self._generate(system, contents, schema)
+            finally:
+                self.model = main
+        raise last
+
     async def _parse(self, system: str, contents: list, schema: type[BaseModel]):
         from google.genai import errors
 
         try:
-            response = await self._generate(system, contents, schema)
+            response = await self._generate_with_retry(system, contents, schema)
         except errors.ClientError as e:
             # 설정한 모델 이름이 없어졌거나 틀렸으면, 쓸 수 있는 Flash 모델을 찾아 한 번 다시 시도한다
             if getattr(e, "code", None) != 404 or self._model_checked:

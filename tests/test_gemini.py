@@ -182,3 +182,43 @@ async def test_thinking_setting_rejected_falls_back():
     assert configs[0] is not None and configs[1] is None
     await ai.analyze(item)
     assert configs[-1] is None                    # 한 번 거부되면 계속 기본 설정
+
+
+async def test_overloaded_model_retries_then_uses_backup():
+    from google.genai import errors
+
+    ai = GeminiAnalyzer("test-key", "gemini-flash-latest")
+    ai.RETRY_DELAYS = (0, 0)
+    used = []
+
+    class Models:
+        async def generate_content(self, model, contents, config):
+            used.append(model)
+            if model == "gemini-flash-latest":
+                raise errors.ServerError(503, {"error": {"code": 503, "message": "high demand", "status": "UNAVAILABLE"}})
+            return SimpleNamespace(parsed=ANALYSIS, text="{}")
+
+    ai.client = SimpleNamespace(aio=SimpleNamespace(models=Models()))
+    item = AnalyzeInput(kind="file", name="a.txt", text="본문", topic_tags=["기획"])
+    assert await ai.analyze(item) == ANALYSIS
+    assert used == ["gemini-flash-latest"] * 3 + ["gemini-flash-lite-latest"]
+    assert ai.model == "gemini-flash-latest"      # 다음 요청은 다시 원래 모델로
+
+
+async def test_overload_recovers_on_retry():
+    from google.genai import errors
+
+    ai = GeminiAnalyzer("test-key", "gemini-flash-latest")
+    ai.RETRY_DELAYS = (0, 0)
+    used = []
+
+    class Models:
+        async def generate_content(self, model, contents, config):
+            used.append(model)
+            if len(used) == 1:
+                raise errors.ServerError(503, {"error": {"code": 503, "message": "busy", "status": "UNAVAILABLE"}})
+            return SimpleNamespace(parsed=SearchPicks(picks=[]), text="{}")
+
+    ai.client = SimpleNamespace(aio=SimpleNamespace(models=Models()))
+    assert await ai.pick("x", [], []) == []
+    assert used == ["gemini-flash-latest", "gemini-flash-latest"]
